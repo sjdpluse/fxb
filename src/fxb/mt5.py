@@ -15,6 +15,11 @@ from .simulator import portfolio_state, ACTION_NAMES
 from .research import load_checkpoint
 
 MAGIC = 9261109
+# MQL5 SYMBOL_ORDER_MODE flags. These are not consistently exported by the
+# Python wheel; their values come from the official Symbol Properties table.
+ORDER_CAPABILITY_MARKET = 1
+ORDER_CAPABILITY_SL = 16
+ORDER_CAPABILITY_TP = 32
 
 
 class Blocked(RuntimeError):
@@ -162,7 +167,8 @@ class MT5:
         info, tick = self.symbol(symbol), self.tick(symbol, now)
         if info.trade_mode != self.api.SYMBOL_TRADE_MODE_FULL:
             raise Blocked("Symbol does not permit full trading")
-        if not info.order_mode & self.api.SYMBOL_ORDER_SL or not info.order_mode & self.api.SYMBOL_ORDER_TP:
+        required = ORDER_CAPABILITY_MARKET | ORDER_CAPABILITY_SL | ORDER_CAPABILITY_TP
+        if info.order_mode & required != required:
             raise Blocked("Broker-side SL and TP are mandatory")
         for name, expected in (("point", spec.point), ("trade_tick_size", spec.tick_size),
                                 ("volume_min", spec.lot_min), ("volume_step", spec.lot_step), ("volume_max", spec.lot_max)):

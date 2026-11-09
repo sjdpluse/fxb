@@ -4,7 +4,7 @@
 
 - Linux, CPython 3.12.14, NumPy 2.3.5.
 - Editable package build/install succeeded with the declared build backend.
-- `python -m unittest discover -s tests -q`: **45 tests passed**.
+- `python -m unittest discover -s tests -q`: **45 core tests passed**. An additional native-SDK contract test is skipped on Linux and runs on Windows with the actual pinned MetaTrader5 wheel, without connecting to a terminal.
 - `python -m compileall -q src tests`: passed.
 - `git diff --cached --check`: passed before publication.
 - Installed CLI: synthetic generation, three training epochs, saved-model evaluation and memory inspection completed for both XAUUSD and US100 fixtures (2,400 manufactured M5 bars each). All eight command invocations exited 0. Reloaded-policy evaluation reproduced the saved holdout metrics.
@@ -21,4 +21,4 @@
 - No FlyWire dataset was downloaded, trained or represented as a biological simulation.
 - No Supabase project was modified. The SQL bootstrap and HTTP integration still need a test against the intended database, including role/grant verification and security advisors.
 - No profitability, forecast accuracy, live readiness, general intelligence or causal market understanding is claimed.
-- GitHub Actions is configured to repeat tests and CLI smoke checks on Python 3.11/3.12 for Linux/Windows. Its hosted results are separate from the local evidence above.
+- GitHub Actions repeats tests and CLI smoke checks on Python 3.11/3.12 for Linux/Windows, including the installed MT5 SDK surface on Windows. The initial core suite passed in all four jobs; hosted results for subsequent commits are recorded in the repository's Actions tab.

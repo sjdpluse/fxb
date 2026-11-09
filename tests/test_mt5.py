@@ -16,8 +16,6 @@ class FakeMT5:
     SYMBOL_CHART_MODE_BID = 0
     SYMBOL_TRADE_EXECUTION_MARKET = 2
     SYMBOL_TRADE_MODE_FULL = 4
-    SYMBOL_ORDER_SL = 16
-    SYMBOL_ORDER_TP = 32
     ORDER_TYPE_BUY = POSITION_TYPE_BUY = 0
     ORDER_TYPE_SELL = 1
     ORDER_FILLING_FOK, ORDER_FILLING_IOC, ORDER_FILLING_RETURN = 0, 1, 2
@@ -32,7 +30,7 @@ class FakeMT5:
         self.terminal_value = NS(connected=True, trade_allowed=True, tradeapi_disabled=False)
         self.info = NS(point=0.01, trade_tick_size=0.01, trade_tick_value_loss=1.,
                        volume_min=0.01, volume_max=20., volume_step=0.01, trade_stops_level=10,
-                       filling_mode=1, trade_exemode=2, trade_mode=4, order_mode=48, chart_mode=0)
+                       filling_mode=1, trade_exemode=2, trade_mode=4, order_mode=49, chart_mode=0)
         self.quote = NS(bid=2000., ask=2000.15, time_msc=time.time() * 1000)
         self.open_positions, self.pending_orders = (), ()
         self.calls, self.check_code, self.fail, self.result_code = 0, 0, None, self.TRADE_RETCODE_DONE
