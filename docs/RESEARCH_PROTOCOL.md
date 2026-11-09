@@ -54,7 +54,7 @@ News blocking uses a separately maintained calendar with explicit coverage. The 
 - A selected and licensed biological dataset/subgraph with explicit sign assumptions.
 - Multiple controlled research runs and preserved evaluation reports.
 - Windows MT5 demo forward execution, including disconnects, rollover, rejection and partial-fill scenarios.
-- Applying the journal schema to the intended Supabase project and verifying role access, insert/upsert and advisors there.
+- Configuring the backend secret locally and verifying HTTP sync from the Windows runtime. The connected Supabase project's journal schema, backend SQL insert/upsert/read and denied public grants have been verified; see VALIDATION.md.
 - Tick-level and correlated multi-asset portfolio simulation before treating individual-symbol reports as portfolio performance.
 
 Until that evidence exists, the appropriate status is **research prototype with tested software paths**, not an autonomous profitable trader.
