@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.env
+.env.*
+!.env.example
+data/
+runs/
+state/
+*.sqlite*
+*.npz
+*.lock
+build/
+dist/
+.coverage

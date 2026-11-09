@@ -1,0 +1,380 @@
+"""MT5 transport and demo-only execution. A real account is always rejected."""
+from dataclasses import asdict
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+import hashlib
+import json
+import math
+import os
+import time
+import uuid
+import numpy as np
+from .data import Bars, KABUL, day_key, timestamp, features
+from .risk import Spec, Guard, Risk, levels, size_lots
+from .simulator import portfolio_state, ACTION_NAMES
+from .research import load_checkpoint
+
+MAGIC = 9261109
+
+
+class Blocked(RuntimeError):
+    pass
+
+
+class WorkerLock:
+    """Single worker per state directory; a crash leaves a fail-closed lock."""
+    def __init__(self, database):
+        self.path = Path(str(database) + ".worker.lock")
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            raise Blocked("Worker lock exists; verify no worker is running before removing it") from None
+        with os.fdopen(fd, "w") as f:
+            f.write(str(os.getpid()))
+        return self
+
+    def __exit__(self, *args):
+        self.path.unlink()
+
+
+class NewsGate:
+    def __init__(self, path):
+        self.path = path
+
+    def check(self, now, horizon=0):
+        if not self.path:
+            raise Blocked("A verified economic-calendar file is required for demo entries")
+        try:
+            doc = json.loads(Path(self.path).read_text(encoding="utf-8"))
+            start, end, updated = [timestamp(doc[k]) for k in ("coverage_start", "coverage_end", "updated_at")]
+            events = doc["events"]
+            if (not isinstance(events, list) or not isinstance(doc["source_url"], str)
+                    or not doc["source_url"].startswith("https://")):
+                raise ValueError("Missing calendar provenance")
+            if not start <= now or not now + horizon < end or not 0 <= now - updated <= 86400:
+                raise Blocked("Economic-calendar coverage is missing or older than 24 hours")
+            for event in events:
+                if (not isinstance(event, dict) or event.get("impact") not in ("low", "medium", "high")
+                        or not isinstance(event.get("currency"), str)):
+                    raise ValueError("Invalid event schema")
+                at = timestamp(event["time"])
+                if event["currency"] == "USD" and event["impact"] == "high" and now - 900 <= at <= now + max(900, horizon):
+                    raise Blocked("High-impact USD news blackout")
+        except (KeyError, ValueError, TypeError, OSError) as e:
+            raise Blocked("Invalid economic-calendar file") from e
+
+
+class MT5:
+    def __init__(self, api=None, terminal=None):
+        self.api = api
+        self.terminal = terminal
+
+    def connect(self):
+        if self.api is None:
+            if os.name != "nt":
+                raise Blocked("MT5 execution requires 64-bit Windows and a locally installed MT5 terminal")
+            try:
+                import MetaTrader5
+            except ImportError:
+                raise Blocked('Install the Windows extra: pip install -e ".[mt5]"') from None
+            self.api = MetaTrader5
+        ok = self.api.initialize(self.terminal) if self.terminal else self.api.initialize()
+        if not ok:
+            raise Blocked("MT5 initialization failed")
+        return self
+
+    def close(self):
+        if self.api is not None:
+            self.api.shutdown()
+
+    def account(self, expected_login=None, demo=False):
+        account = self.api.account_info()
+        terminal = self.api.terminal_info()
+        if account is None or terminal is None or not terminal.connected:
+            raise Blocked("MT5 account or terminal unavailable")
+        if expected_login is not None and account.login != expected_login:
+            raise Blocked("Connected MT5 login differs from the configured account")
+        if demo:
+            if expected_login is None or account.trade_mode != self.api.ACCOUNT_TRADE_MODE_DEMO:
+                raise Blocked("Execution is restricted to an explicitly identified DEMO account")
+            if not account.trade_allowed or not account.trade_expert or not terminal.trade_allowed or terminal.tradeapi_disabled:
+                raise Blocked("Terminal/account algorithmic trading permission is disabled")
+        if not all(math.isfinite(v) and v > 0 for v in (account.equity, account.margin_free)):
+            raise Blocked("Invalid equity or free margin")
+        return account
+
+    def symbol(self, name):
+        if not self.api.symbol_select(name, True):
+            raise Blocked("Exact broker symbol could not be selected")
+        info = self.api.symbol_info(name)
+        if info is None:
+            raise Blocked("Symbol metadata unavailable")
+        if info.chart_mode != self.api.SYMBOL_CHART_MODE_BID:
+            raise Blocked("This release only supports bid-chart CFDs, not last-price futures")
+        return info
+
+    def tick(self, symbol, now=None):
+        tick = self.api.symbol_info_tick(symbol)
+        now = time.time() if now is None else now
+        if (tick is None or not all(math.isfinite(v) for v in (tick.bid, tick.ask, tick.time_msc))
+                or tick.bid <= 0 or tick.ask < tick.bid or not -2 <= now - tick.time_msc / 1000 <= 10):
+            raise Blocked("Missing, stale or invalid executable quote")
+        return tick
+
+    def positions(self):
+        positions, orders = self.api.positions_get(), self.api.orders_get()
+        if positions is None or orders is None:
+            raise Blocked("Cannot reconcile positions or pending orders")
+        return positions, orders
+
+    def spec(self, symbol, commission, slippage, overnight):
+        info, account = self.symbol(symbol), self.account()
+        tick = self.tick(symbol)
+        ref = max(info.volume_min, min(1.0, info.volume_max))
+        margin = self.api.order_calc_margin(self.api.ORDER_TYPE_BUY, symbol, ref, tick.ask)
+        if margin is None or not math.isfinite(margin) or margin <= 0:
+            raise Blocked("Cannot obtain margin in the account currency")
+        return Spec(symbol, account.currency, 300, info.point, info.trade_tick_size,
+                    info.trade_tick_value_loss, info.volume_min, info.volume_max, info.volume_step,
+                    margin / ref, commission, slippage, overnight, info.trade_stops_level * info.point)
+
+    def bars(self, spec, count=512):
+        raw = self.api.copy_rates_from_pos(spec.symbol, self.api.TIMEFRAME_M5, 1, count)
+        if raw is None or len(raw) < min(count, 512):
+            raise Blocked("Insufficient closed M5 history; load more bars in MT5")
+        return Bars(raw["time"].astype(float), raw["open"], raw["high"], raw["low"], raw["close"],
+                    raw["tick_volume"].astype(float), raw["spread"] * spec.point, spec,
+                    "MT5 broker bid bars; margin/tick-value snapshot; bar spread approximation", False).validate()
+
+    def filling(self, info):
+        if info.filling_mode & 1:
+            return self.api.ORDER_FILLING_FOK
+        if info.filling_mode & 2:
+            return self.api.ORDER_FILLING_IOC
+        if info.trade_exemode != self.api.SYMBOL_TRADE_EXECUTION_MARKET:
+            return self.api.ORDER_FILLING_RETURN
+        raise Blocked("No supported market-order filling policy")
+
+    def request(self, symbol, side, atr, spec, risk, account, now=None):
+        info, tick = self.symbol(symbol), self.tick(symbol, now)
+        if info.trade_mode != self.api.SYMBOL_TRADE_MODE_FULL:
+            raise Blocked("Symbol does not permit full trading")
+        if not info.order_mode & self.api.SYMBOL_ORDER_SL or not info.order_mode & self.api.SYMBOL_ORDER_TP:
+            raise Blocked("Broker-side SL and TP are mandatory")
+        for name, expected in (("point", spec.point), ("trade_tick_size", spec.tick_size),
+                                ("volume_min", spec.lot_min), ("volume_step", spec.lot_step), ("volume_max", spec.lot_max)):
+            if not math.isclose(getattr(info, name), expected, rel_tol=1e-9):
+                raise Blocked("Broker contract changed; re-export metadata and revalidate the model")
+        spread = tick.ask - tick.bid
+        if not math.isfinite(atr) or atr <= 0 or spread > risk.max_spread_atr * atr:
+            raise Blocked("Spread is too large relative to ATR")
+        entry = tick.ask if side > 0 else tick.bid
+        # Include spread when respecting the broker's stop distance from its closing quote.
+        active_spec = Spec(**(asdict(spec) | {"stops_level": info.trade_stops_level * info.point + spread}))
+        stop, target = levels(side, entry, atr, active_spec, risk)
+        order_type = self.api.ORDER_TYPE_BUY if side > 0 else self.api.ORDER_TYPE_SELL
+        ref = max(info.volume_min, min(1.0, info.volume_max))
+        slip = math.ceil(spec.slippage_points) * spec.point
+        loss = self.api.order_calc_profit(order_type, symbol, ref, entry + side * slip, stop - side * slip)
+        margin = self.api.order_calc_margin(order_type, symbol, ref, entry + side * slip)
+        if loss is None or margin is None or not math.isfinite(loss) or loss >= 0:
+            raise Blocked("Broker could not price stop-loss risk")
+        loss_per_lot = -loss / ref + 2 * spec.commission_per_lot_side
+        lots = size_lots(account.equity, loss_per_lot, account.margin_free, margin / ref, active_spec, risk)
+        if not lots:
+            raise Blocked("Minimum lot would exceed risk or margin budget")
+        return {"action": self.api.TRADE_ACTION_DEAL, "symbol": symbol, "volume": lots,
+                "type": order_type, "price": entry, "sl": stop, "tp": target,
+                "deviation": int(math.ceil(spec.slippage_points)), "magic": MAGIC,
+                "type_time": self.api.ORDER_TIME_GTC, "type_filling": self.filling(info)}
+
+    def close_request(self, position):
+        info, tick = self.symbol(position.symbol), self.tick(position.symbol)
+        buy = position.type == self.api.POSITION_TYPE_BUY
+        return {"action": self.api.TRADE_ACTION_DEAL, "position": position.ticket,
+                "symbol": position.symbol, "volume": position.volume,
+                "type": self.api.ORDER_TYPE_SELL if buy else self.api.ORDER_TYPE_BUY,
+                "price": tick.bid if buy else tick.ask, "deviation": 20, "magic": MAGIC,
+                "type_time": self.api.ORDER_TIME_GTC, "type_filling": self.filling(info)}
+
+    def send_demo(self, request, key, memory, expected_login, execute=False):
+        self.account(expected_login, demo=True)
+        positions, orders = self.positions()
+        if "position" in request:
+            own = [p for p in positions if p.ticket == request["position"] and p.magic == MAGIC
+                   and p.symbol == request["symbol"]]
+            if len(own) != 1 or request["volume"] > own[0].volume:
+                raise Blocked("Closing request does not match an owned position")
+        else:
+            if positions or orders:
+                raise Blocked("Account already has exposure or pending orders")
+            buy = request["type"] == self.api.ORDER_TYPE_BUY
+            entry, stop, target = request["price"], request.get("sl", 0), request.get("tp", 0)
+            if not (0 < stop < entry < target if buy else 0 < target < entry < stop):
+                raise Blocked("Opening orders require valid broker-side SL and TP")
+            slot = f"entry-slot:{expected_login}:{int(time.time() // 300)}"
+            if execute and memory.get_state(slot) not in (None, key):
+                raise Blocked("Another policy already reserved this account's entry for the current M5 bar")
+        if not execute:
+            return {"status": "dry_run", "request": request}
+        if memory.unresolved():
+            raise Blocked("Uncertain previous order exists; reconcile it in MT5 before continuing")
+        request = request | {"comment": "fxb-" + hashlib.sha256(key.encode()).hexdigest()[:20]}
+        check = self.api.order_check(request)
+        if check is None or check.retcode != 0:
+            raise Blocked("Broker order_check rejected the request")
+        if not memory.claim_order(key, request):
+            return {"status": "duplicate_blocked"}
+        if "position" not in request:
+            memory.put_state(slot, key)
+        # Recheck the account and quote immediately before the only submission call.
+        try:
+            self.account(expected_login, demo=True)
+            tick = self.tick(request["symbol"])
+            quote = tick.ask if request["type"] == self.api.ORDER_TYPE_BUY else tick.bid
+            point = self.symbol(request["symbol"]).point
+            if abs(quote - request["price"]) > request["deviation"] * point:
+                memory.order_status(key, "rejected", {"reason": "quote_moved"})
+                raise Blocked("Quote moved outside the configured deviation; no send")
+        except Exception:
+            memory.order_status(key, "rejected", {"reason": "pre_send_check_failed"})
+            raise
+        try:
+            result = self.api.order_send(request)
+        except Exception:
+            memory.order_status(key, "ambiguous", {"request": request})
+            raise Blocked("Order outcome is unknown; automatic retry is disabled") from None
+        if result is None:
+            memory.order_status(key, "ambiguous", {"request": request})
+            raise Blocked("MT5 returned no order result; reconcile before restarting")
+        if result.retcode not in (self.api.TRADE_RETCODE_DONE, self.api.TRADE_RETCODE_DONE_PARTIAL):
+            # Even a server timeout or PLACED response is ambiguous: never send again.
+            memory.order_status(key, "ambiguous", {"request": request, "retcode": result.retcode})
+            raise Blocked(f"Unconfirmed MT5 result {result.retcode}; reconcile before restarting")
+        payload = {"request": request, "retcode": result.retcode, "order": result.order,
+                   "deal": result.deal, "volume": result.volume, "price": result.price}
+        memory.order_status(key, "sent", payload)
+        return {"status": "sent", **payload}
+
+
+def collect_deals(bridge, memory, account_key, now):
+    deals = bridge.api.history_deals_get(datetime.fromtimestamp(now - 7 * 86400, timezone.utc),
+                                         datetime.fromtimestamp(now + 1, timezone.utc))
+    if deals is None:
+        raise Blocked("Trade history unavailable; cannot reconcile realized outcomes")
+    for d in deals:
+        if d.magic == MAGIC:
+            payload = {k: getattr(d, k) for k in ("ticket", "position_id", "symbol", "type", "entry",
+                       "volume", "price", "profit", "commission", "swap", "fee", "comment")}
+            payload["net_cashflow"] = d.profit + d.commission + d.swap + d.fee
+            memory.record(account_key, d.symbol, "broker_deal", d.time, max(d.time, now), payload,
+                          str(uuid.uuid5(uuid.NAMESPACE_URL, f"{account_key}:deal:{d.ticket}")))
+
+
+def cycle(bridge, model_path, memory, expected_login, calendar=None, execute=False, kill_file="STOP"):
+    agent, reservoir, scaler, meta = load_checkpoint(model_path)
+    spec, risk = Spec(**meta["spec"]), Risk(**meta["risk"])
+    now = time.time()
+    account = bridge.account(expected_login, demo=True)
+    if spec.currency != account.currency:
+        raise Blocked("Account currency differs from training metadata")
+    if execute and meta["synthetic"]:
+        raise Blocked("A model trained on synthetic prices cannot send demo orders")
+    account_key = hashlib.sha256(f"{account.server}:{account.login}".encode()).hexdigest()[:20]
+    collect_deals(bridge, memory, account_key, now)
+    guard_key = "guard:" + account_key
+    guard = Guard(**memory.get_state(guard_key, {}))
+    guard.update(account.equity, day_key(now), risk)
+    # Preserve a journaled count, but reconcile broker entries after a process crash.
+    midnight = datetime.fromtimestamp(now, KABUL).replace(hour=0, minute=0, second=0, microsecond=0)
+    day_deals = bridge.api.history_deals_get(midnight.astimezone(timezone.utc), datetime.fromtimestamp(now + 1, timezone.utc))
+    if day_deals is None:
+        raise Blocked("Daily deal history unavailable")
+    entry_orders = {d.order for d in day_deals if d.entry in (bridge.api.DEAL_ENTRY_IN, bridge.api.DEAL_ENTRY_INOUT)}
+    guard.entries = max(guard.entries, len(entry_orders))
+    memory.put_state(guard_key, asdict(guard))
+    positions, pending = bridge.positions()
+    owned = [p for p in positions if p.magic == MAGIC and p.symbol == spec.symbol]
+    if len(owned) > 1:
+        raise Blocked("Multiple owned positions require manual reconciliation")
+    p = owned[0] if owned else None
+    age = max(0, int((now - p.time) // 300)) if p else 0
+    stop_requested = Path(kill_file).exists()
+    # Risk exits do not wait for candles or a valid news calendar.
+    force_close = bool(p and (stop_requested or guard.total_halt or guard.daily_halt
+                             or age >= risk.max_hold_bars or p.sl <= 0 or p.tp <= 0))
+    if force_close:
+        key = f"{account_key}:{p.ticket}:risk-close:{int(now // 300)}"
+        result = bridge.send_demo(bridge.close_request(p), key, memory, expected_login, execute)
+        return {"action": "CLOSE", "reason": "risk_time_or_stop_file", **result}
+    if stop_requested:
+        return {"action": "WAIT", "reason": "stop_file"}
+    bars = bridge.bars(spec)
+    closed_at = bars.time[-1] + 300
+    if not 0 <= now - closed_at < 300:
+        raise Blocked("Latest closed bar is stale or in the future")
+    key = f"{account_key}:{meta['run_id']}:{spec.symbol}:{int(closed_at)}"
+    if execute and memory.get_state("decision:" + key):
+        return {"action": "WAIT", "reason": "already_processed_bar"}
+    raw, atr = features(bars)
+    encoded = reservoir.encode(scaler.transform(raw))[-1]
+    side = (1 if p.type == bridge.api.POSITION_TYPE_BUY else -1) if p else 0
+    state = np.r_[encoded, portfolio_state(side, age, p.profit if p else 0, account.equity, guard, risk)]
+    slot = f"entry-slot:{expected_login}:{int(now // 300)}"
+    can_enter = (not positions and not pending and not guard.reason(risk)
+                 and (not execute or memory.get_state(slot) is None))
+    mask = np.asarray([True, can_enter, can_enter, bool(p)])
+    action = agent.act(state, mask)
+    decision = {"action": ACTION_NAMES[action], "q_values": agent.online.predict(state).tolist(),
+                "reason": guard.reason(risk) or "frozen_policy", "synthetic_model": meta["synthetic"],
+                "model_run": meta["run_id"], "bar_closed_at": closed_at,
+                "features": dict(zip(meta["features"], raw[-1].tolist()))}
+    # Persist decision before submission; a crash cannot cause a new action for this bar.
+    if execute:
+        memory.put_state("decision:" + key, decision)
+    memory.record(meta["run_id"], spec.symbol, "decision", closed_at, now, decision,
+                  str(uuid.uuid5(uuid.NAMESPACE_URL, key + (":execute" if execute else ":dry"))))
+    if action in (1, 2):
+        try:
+            NewsGate(calendar).check(now, risk.max_hold_bars * 300)
+            request = bridge.request(spec.symbol, 1 if action == 1 else -1, atr[-1], spec, risk, account)
+        except Blocked as e:
+            veto = decision | {"status": "blocked", "reason": str(e)}
+            memory.record(meta["run_id"], spec.symbol, "decision", closed_at, now, veto,
+                          str(uuid.uuid5(uuid.NAMESPACE_URL, key + ":veto")))
+            return veto
+        result = bridge.send_demo(request, key, memory, expected_login, execute)
+        if result["status"] == "sent":
+            guard.entries += 1
+            memory.put_state(guard_key, asdict(guard))
+    elif action == 3:
+        result = bridge.send_demo(bridge.close_request(p), key, memory, expected_login, execute)
+    else:
+        result = {"status": "no_order"}
+    return decision | result
+
+
+def reconcile(bridge, memory, expected_login):
+    account = bridge.account(expected_login, demo=True)
+    account_key = hashlib.sha256(f"{account.server}:{account.login}".encode()).hexdigest()[:20]
+    now = time.time()
+    deals = bridge.api.history_deals_get(datetime.fromtimestamp(now - 30 * 86400, timezone.utc),
+                                         datetime.fromtimestamp(now + 1, timezone.utc))
+    if deals is None:
+        raise Blocked("Cannot retrieve deal history")
+    resolved = []
+    for row in memory.unresolved():
+        if not row["key"].startswith(account_key + ":"):
+            continue
+        payload = json.loads(row["payload"])
+        request = payload.get("request", payload)
+        matching = [d for d in deals if d.magic == MAGIC and d.symbol == request.get("symbol")
+                    and d.comment == request.get("comment")]
+        if matching:
+            memory.order_status(row["key"], "sent", {"request": request, "reconciled_deals": [d.ticket for d in matching]})
+            resolved.append(row["key"])
+    return {"resolved": resolved, "remaining": len(memory.unresolved()),
+            "note": "Absence of a matching deal does not prove rejection; unresolved records remain blocked."}

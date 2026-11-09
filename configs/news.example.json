@@ -1,0 +1,8 @@
+{
+  "source_url": "https://www.bls.gov/schedule/",
+  "coverage_start": "2000-01-01T00:00:00Z",
+  "coverage_end": "2000-01-02T00:00:00Z",
+  "updated_at": "2000-01-01T00:00:00Z",
+  "events": [],
+  "note": "INVALID EXAMPLE ONLY. Replace with verified high-impact USD releases, real coverage and update times. Event fields: time (offset ISO8601), currency (USD), impact (high), title. Include all relevant sources, not only BLS."
+}

@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools==84.2.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fxb"
+version = "0.1.0"
+description = "Connectome-informed reinforcement-learning research for MT5 CFDs"
+requires-python = ">=3.11"
+dependencies = ["numpy==2.3.5"]
+
+[project.optional-dependencies]
+mt5 = ["MetaTrader5==5.0.6231; platform_system == 'Windows'"]
+
+[project.scripts]
+fxb = "fxb.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
