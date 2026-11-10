@@ -4,16 +4,21 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fxb"
-version = "0.1.0"
-description = "Connectome-informed reinforcement-learning research for MT5 CFDs"
+version = "0.2.0"
+description = "Connectome trading workstation with whole-brain simulation and controlled MT5 execution"
 requires-python = ">=3.11"
 dependencies = ["numpy==2.3.5"]
 
 [project.optional-dependencies]
 mt5 = ["MetaTrader5==5.0.6231; platform_system == 'Windows'"]
+brain = ["brian2==2.10.1", "pyarrow==26.0.1", "pandas==2.2.3", "scipy==1.17.0", "joblib==1.5.3"]
+desktop = ["fastapi==0.162.2", "starlette==1.10.0", "uvicorn==0.54.0", "httpx==0.28.1"]
 
 [project.scripts]
 fxb = "fxb.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+fxb = ["static/*", "upstream/LICENSE", "upstream/README.md"]

@@ -91,6 +91,11 @@ class Memory:
                 "pending_sync": self.db.execute("SELECT count(*) FROM events WHERE synced=0").fetchone()[0],
                 "unresolved_orders": len(self.unresolved())}
 
+    def recent_events(self, limit=100):
+        rows = self.db.execute("SELECT id,run_id,symbol,kind,occurred_at,available_at,payload FROM events ORDER BY rowid DESC LIMIT ?",
+                               (min(max(int(limit), 1), 500),)).fetchall()
+        return [dict(r) | {"payload": json.loads(r["payload"])} for r in rows]
+
     def sync(self, transport, batch=100):
         rows = self.db.execute("SELECT * FROM events WHERE synced=0 ORDER BY rowid LIMIT ?", (batch,)).fetchall()
         if not rows:

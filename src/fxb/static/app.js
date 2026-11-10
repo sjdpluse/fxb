@@ -1,0 +1,104 @@
+'use strict';
+const $ = id => document.getElementById(id);
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const num = (n, digits = 0) => n == null ? '—' : Number(n).toLocaleString('en-US', {maximumFractionDigits: digits, minimumFractionDigits: digits});
+const hash = new URLSearchParams(location.hash.slice(1));
+if (hash.has('token')) { sessionStorage.setItem('fxb_token', hash.get('token')); history.replaceState(null, '', location.pathname); }
+const token = sessionStorage.getItem('fxb_token') || '';
+let snapshot, currentPage = 'overview', initializedConfig = false, oldModels = '', oldDatasets = '', geometryLoaded = false, geometryLoading = false, lastJob = '', toastTimer;
+const pageInfo = {
+  overview:['OVERVIEW','مرکز فرماندهی معاملات','فعالیت مغز، وضعیت سرمایه و تصمیم‌های سیستم در یک محیط.'],
+  brain:['NEURAL ENGINE','کانکتوم زنده','نورون‌های واقعی، دینامیک مدل اصلی و انتشار قابل مشاهدهٔ فعالیت.'],
+  training:['MODEL TRAINING','آموزش و ارزیابی مدل','دادهٔ بروکر، یادگیری با پاداش و ارزیابی روی تاریخچهٔ ندیده.'],
+  execution:['EXECUTION','اجرای کنترل‌شدهٔ معاملات','حساب مشخص، سیاست ثابت و کنترل ریسک مستقل از تصمیم مدل.'],
+  journal:['MEMORY','حافظه و دفتر عملیات','تصمیم‌ها، نتیجهٔ اجرا و رویدادهای قابل پیگیری.'],
+  settings:['CONFIGURATION','اتصال و تنظیمات','ترمینال محلی، دادهٔ زیستی و تقویم اقتصادی.']
+};
+function toast(message, error=false) { const el=$('toast');el.textContent=message;el.className=error?'error':'';el.hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.hidden=true,error?9000:4500); }
+async function api(path, body) {
+  const response=await fetch('/api/'+path,{method:body===undefined?'GET':'POST',headers:{'Authorization':'Bearer '+token,...(body===undefined?{}:{'Content-Type':'application/json'})},body:body===undefined?undefined:JSON.stringify(body)});
+  const data=await response.json();
+  if(!response.ok) throw new Error(data.error || data.detail || `HTTP ${response.status}`);
+  return data;
+}
+async function command(path, body={}) { try{const r=await api(path,body);toast(r.status==='started'?'عملیات آغاز شد.':r.status==='flatten_requested'?'درخواست بستن ثبت شد؛ تأیید بروکر را بررسی کنید.':'عملیات ثبت شد.');await poll();return r;}catch(e){toast(e.message,true);throw e;} }
+function page(name) {if(!pageInfo[name])return;currentPage=name;document.querySelectorAll('[data-view]').forEach(el=>el.classList.toggle('active',el.dataset.view.split(' ').includes(name)));document.querySelectorAll('.nav').forEach(el=>el.classList.toggle('active',el.dataset.page===name));const info=pageInfo[name];$('page-label').textContent=info[0];$('page-title').textContent=info[1];$('page-subtitle').textContent=info[2];$('financial-strip').hidden=!['overview','execution'].includes(name);if(name==='journal')loadJournal();if(brain)brain.resize();}
+document.querySelectorAll('[data-page]').forEach(el=>el.addEventListener('click',()=>page(el.dataset.page)));
+document.querySelectorAll('[data-go]').forEach(el=>el.addEventListener('click',()=>page(el.dataset.go)));
+document.querySelector('.brand').addEventListener('click',e=>{e.preventDefault();page('overview');});
+document.querySelectorAll('[data-action]').forEach(el=>el.addEventListener('click',async()=>{el.disabled=true;try{await command(el.dataset.action);}catch{}finally{el.disabled=false;}}));
+function table(headers,rows,empty){return rows.length?`<table><thead><tr>${headers.map(h=>`<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${r.map(c=>`<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table>`:`<div class="empty">${esc(empty)}</div>`;}
+const kabTime=t=>new Date(t*1000).toLocaleTimeString('en-GB',{timeZone:'Asia/Kabul',hour12:false});
+function render(s){
+  snapshot=s;$('preview-badge').hidden=!s.preview;
+  $('connection').textContent=s.connected?`MT5 · ${s.account?.mode?.toUpperCase()||'CONNECTED'}`:'MT5 DISCONNECTED';$('connection').className='badge '+(s.connected?'green':'');
+  const a=s.account;['equity','balance','profit'].forEach(k=>$(k).textContent=a?num(a[k],2):'—');$('profit').className=a?(a.profit>=0?'positive':'negative'):'';
+  $('account-label').textContent=a?`#${a.login} · ${a.server}`:'حساب متصل نشده';$('currency').textContent=a?`${a.currency} · updated ${kabTime(a.updated_at)} Kabul`:'دادهٔ مستقیم ترمینال';
+  $('engine-state').textContent=s.running?(s.entries_enabled?'RUNNING':'PAUSED'):'STANDBY';$('engine-detail').textContent=s.running?`${s.mode.toUpperCase()} · ${s.active_models.length} MODEL(S)`:'منتظر اتصال و انتخاب مدل';$('run-badge').textContent=s.running?s.mode.toUpperCase():'STOPPED';
+  const error=s.error||(s.job.status==='failed'?s.job.error:null);$('system-alert').hidden=!error;$('system-alert').textContent=error||'';
+  const manifest=s.brain.manifest;
+  $('brain-state').textContent=manifest?'MODEL LOADED':'MODEL NOT INSTALLED';$('brain-state').className='badge '+(manifest?'green':'amber');
+  if(manifest){$('nodes').textContent=num(manifest.neurons);$('edges').textContent=num(manifest.connections);$('synapses').textContent=num(manifest.synapse_contacts);$('neuron-count').textContent=num(manifest.neurons)+' NEURONS';if(!geometryLoaded&&!geometryLoading)loadGeometry();}
+  else{$('brain-empty').textContent='برای دریافت مدل اصلی به تنظیمات بروید.';$('brain-empty').hidden=false;}
+  const activity=s.job.status==='running'&&s.job.kind==='train'&&s.job.progress.activity?s.job.progress.activity:s.brain.activity;
+  $('spikes').textContent=num(activity.spikes||0);$('active-neurons').textContent=num(activity.active_neurons||0);$('simulation-ms').textContent=num(activity.simulation_ms||0,0)+' ms';$('wall-seconds').textContent=activity.wall_seconds==null?'—':num(activity.wall_seconds,2)+' s';
+  $('activity-label').textContent=activity.spikes?'LAST WINDOW':'IDLE';$('activity-source').textContent=activity.input_source==='closed_market_bars'?'ورودی: ویژگی‌های کندل بسته‌شدهٔ بازار.':activity.spikes?'خروجی آخرین بازهٔ شبیه‌سازی واقعی · تحریک دستی':'شبیه‌ساز در انتظار ورودی است.';
+  drawActivity(activity.pool_activity||[]);if(brain)brain.activity(activity.indices||[],activity.counts||[]);
+  $('stimulate-button').disabled=!!s.running||s.job.status==='running'||!manifest;
+  $('decision-count').textContent=s.decisions.length+' EVENTS';
+  if(s.decisions.length){$('decision-stream').className='';$('decision-stream').innerHTML=s.decisions.slice(-4).reverse().map(d=>`<div class="decision-row"><span class="badge ${d.action==='BUY'?'green':d.action==='SELL'?'amber':''}">${esc(d.action)}</span><div>${esc(d.model)}<small>${esc(d.reason||d.status)}</small></div><time>${kabTime(d.time)}</time></div>`).join('');}
+  const checks=[['کانکتوم کامل',!!manifest,manifest?'138,639 neurons · full graph':'نصب از تنظیمات'],['ترمینال معاملاتی',s.connected,s.connected?`${a.login} / ${a.mode}`:'Windows MT5 required'],['مدل با دادهٔ واقعی',s.models.some(m=>!m.synthetic),`${s.models.filter(m=>!m.synthetic).length} frozen models`],['تقویم ورود',s.news.ready,s.news.ready?'Fresh coverage':'نیاز به تقویم معتبر']];
+  $('readiness').innerHTML=checks.map(([name,ok,detail])=>`<div>${esc(name)}<b class="${ok?'ok':''}">${ok?'READY':'PENDING'}</b><small>${esc(detail)}</small></div>`).join('');
+  const modelKey=JSON.stringify(s.models);if(modelKey!==oldModels){oldModels=modelKey;const checked=new Set([...document.querySelectorAll('[name=models]:checked')].map(el=>el.value));$('models-table').innerHTML=table(['MODEL / SYMBOL','ENCODER','SOURCE','TRADES','WIN RATE','RETURN','MAX DD','PROFIT FACTOR'],s.models.map(m=>{const h=m.holdout||{};return[esc(m.name)+'<br>'+esc(m.symbol),esc(m.encoder),`<span class="badge ${m.synthetic?'amber':'green'}">${m.synthetic?'SYNTHETIC':'MARKET DATA'}</span>`,num(h.trades),h.win_rate==null?'—':num(h.win_rate*100,1)+'%',h.return_pct==null?'—':num(h.return_pct,2)+'%',h.max_drawdown_pct==null?'—':num(h.max_drawdown_pct,2)+'%',num(h.profit_factor,2)];}),'هنوز مدلی آموزش داده نشده است. نتایج پس از آموزش نمایش داده می‌شوند.');
+    $('model-choices').innerHTML=s.models.length?s.models.map(m=>`<label class="model-choice"><input type="checkbox" name="models" value="${esc(m.path)}" ${checked.has(m.path)?'checked':''}><span>${esc(m.symbol)} / ${esc(m.name)}<small>${esc(m.encoder)} · ${m.synthetic?'SYNTHETIC — dry run only':'REAL MARKET DATA'}</small></span></label>`).join(''):'مدل آموزش‌دیده‌ای موجود نیست.';}
+  const datasetKey=JSON.stringify(s.datasets);if(datasetKey!==oldDatasets){oldDatasets=datasetKey;const old=$('dataset-select').value;$('dataset-select').innerHTML='<option value="">دیتاست واقعی را انتخاب کنید</option>'+s.datasets.filter(d=>!d.synthetic).map(d=>`<option value="${esc(d.path)}">${esc(d.symbol+' / '+d.path)}</option>`).join('');$('dataset-select').value=old;}
+  $('positions-table').className='table-scroll';$('positions-table').innerHTML=table(['TICKET','SYMBOL','SIDE','LOTS','ENTRY','SL / TP','P&L','OWNER'],s.positions.map(p=>[esc(p.ticket),esc(p.symbol),p.type===0?'BUY':'SELL',num(p.volume,2),num(p.price_open,2),num(p.sl,2)+' / '+num(p.tp,2),num(p.profit,2),p.owned?'FXB':'MAGIC '+esc(p.magic)]),s.connected?'موقعیت بازی در حساب وجود ندارد.':'اتصال به MT5 برقرار نیست.');
+  if(!initializedConfig){for(const[k,id]of[['login','login-input'],['server','server-input'],['terminal','terminal-input']])$(id).value=s.config[k]||'';initializedConfig=true;}
+  $('news-status').textContent=s.news.reason;
+  $('live-status').hidden=!s.live_activation;if(s.live_activation)$('live-status').textContent=`Account ${s.live_activation.login} · ${s.live_activation.active?'ACTIVE':'EXPIRED'} · expires ${kabTime(s.live_activation.expires_at)} Kabul`;
+  const job=s.job,progress=job.progress||{};$('job-panel').hidden=job.status!=='running';$('job-title').textContent=(job.kind||'').toUpperCase();$('job-detail').textContent=[progress.stage,progress.completed?`${num(progress.completed)} / ${num(progress.total)} bars`:null,progress.epoch?`epoch ${progress.epoch}/${progress.epochs}`:null,progress.frame?`${progress.frame}/${progress.frames} windows`:null,progress.bytes?`${num(progress.bytes/1e6,1)} MB`:null,progress.message].filter(Boolean).join(' · ');
+  const jobKey=job.started_at+':'+job.status;if(lastJob&&jobKey!==lastJob&&['completed','failed','cancelled'].includes(job.status))toast(job.status==='failed'?job.error:job.status==='cancelled'?'عملیات لغو شد.':'عملیات کامل شد.',job.status==='failed');lastJob=jobKey;
+  $('start-button').disabled=s.running||!s.connected||s.preview||s.job.status==='running';
+}
+let pollBusy=false;
+async function poll(){if(pollBusy)return;pollBusy=true;try{render(await api('status'));}catch(e){$('system-alert').textContent=e.message;$('system-alert').hidden=false;}finally{pollBusy=false;}}
+async function loadJournal(){try{const rows=await api('journal');$('journal-table').className='table-scroll';$('journal-table').innerHTML=table(['KABUL TIME','SYMBOL','KIND','DETAIL'],rows.map(r=>[kabTime(r.occurred_at),esc(r.symbol),esc(r.kind),esc(JSON.stringify(r.payload).slice(0,700))]),'هنوز رویداد معاملاتی ثبت نشده است.');}catch(e){toast(e.message,true);}}
+$('refresh-journal').addEventListener('click',loadJournal);
+function formHandler(id,handler){$(id).addEventListener('submit',async e=>{e.preventDefault();const data=Object.fromEntries(new FormData(e.target));const b=e.target.querySelector('[type=submit]');b.disabled=true;try{await handler(data);}catch{}finally{b.disabled=false;}});}
+formHandler('stimulate-form',d=>command('brain/stimulate',{channels:d.channels,frames:Number(d.frames),rate:Number(d.rate)}));
+formHandler('connect-form',async d=>{await command('account/configure',{login:Number(d.login),server:d.server.trim(),terminal:d.terminal.trim()});await command('account/connect');});
+formHandler('export-form',d=>command('data/export',{symbol:d.symbol.trim(),bars:Number(d.bars),commission:Number(d.commission),slippage:Number(d.slippage),overnight:Number(d.overnight)}));
+formHandler('train-form',d=>command('training/start',{dataset:d.dataset,epochs:Number(d.epochs),encoder:d.encoder}));
+formHandler('start-form',d=>command('execution/start',{models:[...document.querySelectorAll('[name=models]:checked')].map(el=>el.value),mode:d.mode,hours:Number(d.hours||8),acknowledged_login:d.acknowledged_login?Number(d.acknowledged_login):null}));
+$('mode-select').addEventListener('change',()=>{$('live-fields').hidden=$('mode-select').value!=='live';});
+$('flatten-button').addEventListener('click',()=>$('confirm-dialog').showModal());
+$('cancel-flatten').addEventListener('click',()=>$('confirm-dialog').close());
+$('confirm-flatten').addEventListener('click',async()=>{$('confirm-dialog').close();try{await command('execution/flatten');}catch{}});
+$('save-calendar').addEventListener('click',async()=>{try{const f=$('calendar-file').files[0];if(!f)throw Error('فایل تقویم را انتخاب کنید.');if(f.size>2e6)throw Error('فایل بیش از حد بزرگ است.');await command('calendar/save',JSON.parse(await f.text()));}catch(e){toast(e.message,true);}});
+$('close-inspector').addEventListener('click',()=>$('inspect-dialog').close());
+function drawActivity(values){const c=$('activity-chart'),r=c.getBoundingClientRect();if(!r.width)return;const dpr=Math.min(devicePixelRatio,2);c.width=r.width*dpr;c.height=r.height*dpr;const ctx=c.getContext('2d');ctx.scale(dpr,dpr);const max=Math.max(...values,.05);for(let i=0;i<64;i++){const h=Math.max(1,(values[i]||0)/max*(r.height-10));ctx.fillStyle=values[i]?'#9ddbb6':'#253c40';ctx.fillRect(i*r.width/64,r.height-h,r.width/64-1.5,h);}}
+
+// Every rendered position is an actual FlyWire coordinate. Camera rotation is visual only.
+class BrainView{
+  constructor(canvas,data){this.canvas=canvas;this.data=data;this.positions=new Float32Array(data.positions);this.indexMap=new Map(data.indices.map((v,i)=>[v,i]));this.n=data.indices.length;this.values=new Float32Array(this.n);this.yaw=.13;this.pitch=-.15;this.zoom=1;this.rotating=!matchMedia('(prefers-reduced-motion: reduce)').matches;this.gl=canvas.getContext('webgl',{alpha:true,antialias:true,preserveDrawingBuffer:false});if(this.gl)this.setupGL();else this.ctx=canvas.getContext('2d');this.events();this.resize();this.frame();}
+  setupGL(){const gl=this.gl;const compile=(type,source)=>{const s=gl.createShader(type);gl.shaderSource(s,source);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw Error(gl.getShaderInfoLog(s));return s;};
+    const vs=compile(gl.VERTEX_SHADER,`attribute vec3 aPosition;attribute float aActivity;uniform vec2 uRotation;uniform float uAspect;uniform float uZoom;uniform float uDpr;varying float vActivity;varying float vDepth;void main(){vec3 p=vec3(aPosition.x,-aPosition.z,aPosition.y);float cy=cos(uRotation.x),sy=sin(uRotation.x),cx=cos(uRotation.y),sx=sin(uRotation.y);p=vec3(p.x*cy+p.z*sy,p.y,-p.x*sy+p.z*cy);p=vec3(p.x,p.y*cx-p.z*sx,p.y*sx+p.z*cx);float perspective=2.6/(2.6+p.z);gl_Position=vec4(p.x*perspective*uZoom/uAspect,p.y*perspective*uZoom,p.z*.2,1.);gl_PointSize=(aActivity>0.?3.3:1.25)*uDpr;vActivity=aActivity;vDepth=p.z;}`);
+    const fs=compile(gl.FRAGMENT_SHADER,`precision mediump float;varying float vActivity;varying float vDepth;void main(){float d=length(gl_PointCoord-.5);if(d>.5)discard;vec3 color=vActivity>0.?vec3(.84,1.,.54):mix(vec3(.22,.48,.55),vec3(.56,.83,.75),clamp(.6-vDepth,0.,1.));float alpha=(vActivity>0.?.88:.22)*(1.-smoothstep(.16,.5,d));gl_FragColor=vec4(color,alpha);}`);
+    const program=gl.createProgram();gl.attachShader(program,vs);gl.attachShader(program,fs);gl.linkProgram(program);if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(program));gl.useProgram(program);this.program=program;
+    const position=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,position);gl.bufferData(gl.ARRAY_BUFFER,this.positions,gl.STATIC_DRAW);const loc=gl.getAttribLocation(program,'aPosition');gl.enableVertexAttribArray(loc);gl.vertexAttribPointer(loc,3,gl.FLOAT,false,0,0);
+    this.activityBuffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,this.activityBuffer);gl.bufferData(gl.ARRAY_BUFFER,this.values,gl.DYNAMIC_DRAW);const al=gl.getAttribLocation(program,'aActivity');gl.enableVertexAttribArray(al);gl.vertexAttribPointer(al,1,gl.FLOAT,false,0,0);
+    this.uniforms=Object.fromEntries(['uRotation','uAspect','uZoom','uDpr'].map(k=>[k,gl.getUniformLocation(program,k)]));gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE);gl.clearColor(0,0,0,0);
+  }
+  resize(){const r=this.canvas.getBoundingClientRect();if(!r.width)return;this.width=r.width;this.height=r.height;this.dpr=Math.min(devicePixelRatio||1,2);this.canvas.width=r.width*this.dpr;this.canvas.height=r.height*this.dpr;if(this.gl)this.gl.viewport(0,0,this.canvas.width,this.canvas.height);}
+  activity(indices,counts){const key=indices.join(',')+':'+counts.join(',');if(key===this.activityKey)return;this.activityKey=key;this.values.fill(0);indices.forEach((index,i)=>{const n=this.indexMap.get(index);if(n!==undefined)this.values[n]=Math.min(counts[i]||1,10);});if(this.gl){this.gl.bindBuffer(this.gl.ARRAY_BUFFER,this.activityBuffer);this.gl.bufferSubData(this.gl.ARRAY_BUFFER,0,this.values);}}
+  project(i){const p=this.positions;let x=p[i*3],y=-p[i*3+2],z=p[i*3+1];const a=x*Math.cos(this.yaw)+z*Math.sin(this.yaw);z=-x*Math.sin(this.yaw)+z*Math.cos(this.yaw);x=a;const b=y*Math.cos(this.pitch)-z*Math.sin(this.pitch);z=y*Math.sin(this.pitch)+z*Math.cos(this.pitch);y=b;const t=2.6/(2.6+z)*this.zoom;return[(x*t/ (this.width/this.height)+1)*this.width/2,(1-y*t)*this.height/2];}
+  frame(){if(this.width&&this.canvas.offsetParent!==null){if(this.rotating&&!this.drag)this.yaw+=.0006;if(this.gl){const g=this.gl;g.clear(g.COLOR_BUFFER_BIT);g.useProgram(this.program);g.uniform2f(this.uniforms.uRotation,this.yaw,this.pitch);g.uniform1f(this.uniforms.uAspect,this.width/this.height);g.uniform1f(this.uniforms.uZoom,this.zoom*1.35);g.uniform1f(this.uniforms.uDpr,this.dpr);g.drawArrays(g.POINTS,0,this.n);}else{const c=this.ctx;c.setTransform(this.dpr,0,0,this.dpr,0,0);c.clearRect(0,0,this.width,this.height);for(let i=0;i<this.n;i+=4){const[x,y]=this.project(i);c.fillStyle=this.values[i]?'#d7fda0':'#5c9d9e55';c.fillRect(x,y,this.values[i]?3:1, this.values[i]?3:1);}}}requestAnimationFrame(()=>this.frame());}
+  events(){this.canvas.addEventListener('pointerdown',e=>{this.drag=[e.clientX,e.clientY];this.canvas.setPointerCapture(e.pointerId);});this.canvas.addEventListener('pointermove',e=>{if(this.drag){this.yaw+=(e.clientX-this.drag[0])*.006;this.pitch+=(e.clientY-this.drag[1])*.006;this.drag=[e.clientX,e.clientY];}});this.canvas.addEventListener('pointerup',()=>this.drag=null);this.canvas.addEventListener('pointercancel',()=>this.drag=null);this.canvas.addEventListener('wheel',e=>{e.preventDefault();this.zoom=Math.max(.4,Math.min(3,this.zoom*Math.exp(-e.deltaY*.001)));},{passive:false});this.canvas.addEventListener('dblclick',async e=>{this.rotating=false;const r=this.canvas.getBoundingClientRect();let best=-1,distance=200;const zoom=this.zoom;this.zoom*=this.gl?1.35:1;for(let i=0;i<this.n;i++){const[x,y]=this.project(i),d=(x-e.clientX+r.left)**2+(y-e.clientY+r.top)**2;if(d<distance){best=i;distance=d;}}this.zoom=zoom;if(best>=0)inspectNeuron(this.data.indices[best]);});new ResizeObserver(()=>this.resize()).observe(this.canvas);}
+}
+let brain;
+async function loadGeometry(){geometryLoading=true;try{const data=await api('brain/geometry');brain=new BrainView($('brain-canvas'),data);geometryLoaded=true;$('brain-empty').hidden=true;}catch(e){$('brain-empty').textContent='نمای مغز در دسترس نیست: '+e.message;}finally{geometryLoading=false;}}
+async function inspectNeuron(index){$('neuron-detail').innerHTML='<div class="empty">در حال خواندن اتصال‌های واقعی…</div>';$('inspect-dialog').showModal();try{const d=await api('brain/neuron/'+index);$('neuron-detail').innerHTML=`<p>ROOT ID: <b>${esc(d.root_id)}</b> · INDEX ${d.index} · DEGREE ${num(d.degree)}</p><p dir="rtl">حداکثر ۳۰ اتصال با بیشترین وزن؛ علامت وزن از مدل اصلی گرفته شده است.</p>`+table(['PRESYNAPTIC ID','POSTSYNAPTIC ID','SIGNED WEIGHT'],d.connections.map(c=>[esc(c.pre),esc(c.post),esc(c.weight)]),'اتصالی یافت نشد.');}catch(e){$('neuron-detail').textContent=e.message;}}
+$('orbit').addEventListener('click',()=>{if(brain){brain.rotating=!brain.rotating;$('orbit').textContent=brain.rotating?'Ⅱ':'▷';}});
+$('reset-view').addEventListener('click',()=>{if(brain){brain.yaw=.13;brain.pitch=-.15;brain.zoom=1;}});
+$('fit-view').addEventListener('click',async()=>{try{if(document.fullscreenElement)await document.exitFullscreen();else await document.querySelector('.brain-stage').requestFullscreen();}catch(e){toast(e.message,true);}});
+function clock(){$('clock').textContent=new Date().toLocaleTimeString('en-GB',{timeZone:'Asia/Kabul',hour12:false})+' KABUL';}clock();setInterval(clock,1000);poll();setInterval(poll,1500);

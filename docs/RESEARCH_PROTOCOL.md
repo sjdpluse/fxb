@@ -3,15 +3,15 @@
 ## Hypotheses
 
 1. A frozen recurrent graph can encode useful temporal market information.
-2. A documented FlyWire subgraph may improve an otherwise identical Double-DQN readout.
+2. The original full FlyWire v783 LIF model may improve an otherwise comparable Double-DQN readout.
 3. Any improvement survives transaction costs, new dates, new seeds and demo execution.
 
-None of these hypotheses is an established property of this repository. The default synthetic graph is a computational control, not biological evidence. A connectome maps anatomical connections; it does not encode financial knowledge or establish general reasoning ability.
+None of these hypotheses is an established property of this repository. The workstation defaults to the full published model; the legacy CLI default remains a clearly identified synthetic control. A connectome maps anatomical connections; it does not encode financial knowledge or establish general reasoning ability.
 
 ## Data and chronology
 
 - Obtain the exact broker's bid M5 bars independently for gold and the broker's Nasdaq CFD. Preserve immutable CSV + metadata, checksums, account currency, units and data source.
-- Validate data before training. The feature scaler is fit only on the training partition. Feature windows use at most the current closed bar and preceding observations. Reservoir state is causal; at inference, 512 closed bars provide a contracting-state warmup.
+- Validate data before training. The feature scaler is fit only on the training partition. Feature windows use at most the current closed bar and preceding observations. The full LIF state is causal and live initialization uses 64 closed bars of warmup. Convergence to the state of a continuously running LIF network is not assumed or proven; restart sensitivity needs evaluation. The legacy contracting reservoir uses 512 bars.
 - The policy sees bar `t` after its close. Its action first executes at bar `t+1` open. No same-close fill or future stop-hit information is fed into the decision.
 - Positions are liquidated at partition ends. Keep a holding-window embargo between train, validation and test.
 - Select epochs using validation return minus twice validation maximum drawdown (both percentage points). This is a declared engineering criterion, not a statistically justified optimal objective.
@@ -20,7 +20,7 @@ None of these hypotheses is an established property of this repository. The defa
 
 ## Learning and reward
 
-The fixed reservoir feeds a trainable tanh MLP with four Q outputs. Adam, Huber loss, gradient clipping, bounded replay, legal-action masks and a periodically copied target network train the readout. Double-DQN selects the next action using the online network and values it using the target network. Terminal transitions do not bootstrap. There is no supervised label claiming to know the uniquely correct trade.
+The fixed neural encoder feeds a trainable tanh MLP with four Q outputs. Adam, Huber loss, gradient clipping, bounded replay, legal-action masks and a periodically copied target network train the readout. Double-DQN selects the next action using the online network and values it using the target network. Terminal transitions do not bootstrap. There is no supervised label claiming to know the uniquely correct trade.
 
 At each step:
 
@@ -36,13 +36,13 @@ Weights are learned by the readout, not by the graph. Replaying old transitions 
 
 ## Comparison
 
-Compare the plain DQN control, the synthetic reservoir, and each documented real subgraph using the same histories, seed list, training budget, costs, risk rules and evaluation dates. Keep the flat and simple trend controls. Report all trials, including failures, and include doubled-cost stress. Avoid selecting a particular subgraph after inspecting test outcomes without allocating a fresh test set.
+Compare the plain DQN control, the synthetic reservoir, and the complete original LIF graph (or a separately documented subgraph) using the same histories, seed list, training budget, costs, risk rules and evaluation dates. Keep the flat and simple trend controls. Report all trials, including failures, and include doubled-cost stress. Avoid selecting a particular subgraph after inspecting test outcomes without allocating a fresh test set.
 
-Before considering a future live-capable release, obtain sufficient independent trades across volatile, trending and ranging periods; inspect return, drawdown, net expectancy, tail losses and profit factor jointly. Use block-bootstrap uncertainty intervals appropriate to temporal dependence and account for model-selection trials. No hardcoded count of trades or fixed profit factor certifies safety. This release reports descriptive metrics and does not implement statistical promotion approval.
+Before deploying a selected policy to real capital, obtain sufficient independent trades across volatile, trending and ranging periods; inspect return, drawdown, net expectancy, tail losses and profit factor jointly. Use block-bootstrap uncertainty intervals appropriate to temporal dependence and account for model-selection trials. No hardcoded count of trades or fixed profit factor certifies safety. This release reports descriptive metrics and does not implement statistical promotion approval.
 
 ## Execution reconciliation
 
-Real account submissions are rejected. Demo submissions require the exact configured login, a current quote, known contract properties, broker SL/TP support, an approved order_check and adequate risk/margin. Both models share one worker, journal, daily guard and entry slot; the model order in the CLI provides deterministic priority, not portfolio optimization.
+Real-account submissions are implemented behind explicit, expiring account/server/model/risk activation. Demo and real submissions require the exact configured login, a current quote, known contract properties, broker SL/TP support, an approved order_check and adequate risk/margin. Both models share one worker, journal, daily guard and entry slot; the model order in the CLI provides deterministic priority, not portfolio optimization.
 
 Persist the decision and order reservation before sending. Unknown outcomes stay blocked across restarts. Partial fills are accepted without topping up; the resulting position is read from the broker. Matching broker deal comments can reconcile uncertain requests. A missing match remains unresolved. Independent state directories or external writers can defeat single-worker assumptions and are unsupported.
 
@@ -51,10 +51,10 @@ News blocking uses a separately maintained calendar with explicit coverage. The 
 ## Next evidence required
 
 - Actual broker-specific history and transaction-cost estimates.
-- A selected and licensed biological dataset/subgraph with explicit sign assumptions.
+- Applicable dataset permissions for the intended deployment; the original complete graph has now been downloaded and its actual dynamics verified.
 - Multiple controlled research runs and preserved evaluation reports.
 - Windows MT5 demo forward execution, including disconnects, rollover, rejection and partial-fill scenarios.
 - Configuring the backend secret locally and verifying HTTP sync from the Windows runtime. The connected Supabase project's journal schema, backend SQL insert/upsert/read and denied public grants have been verified; see VALIDATION.md.
 - Tick-level and correlated multi-asset portfolio simulation before treating individual-symbol reports as portfolio performance.
 
-Until that evidence exists, the appropriate status is **research prototype with tested software paths**, not an autonomous profitable trader.
+Current status: **a live-capable local workstation with tested software paths and an unvalidated market policy**. Engineering capability and measured financial performance are separate claims.

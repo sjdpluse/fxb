@@ -1,0 +1,5 @@
+{
+  "name": "fxb-local-workstation",
+  "private": true,
+  "scripts": {"dev": "node scripts/preview.mjs"}
+}

@@ -13,6 +13,7 @@ from fxb.mt5 import MT5, NewsGate, WorkerLock, Blocked, MAGIC, cycle
 
 class FakeMT5:
     ACCOUNT_TRADE_MODE_DEMO = 0
+    ACCOUNT_TRADE_MODE_REAL = 2
     SYMBOL_CHART_MODE_BID = 0
     SYMBOL_TRADE_EXECUTION_MARKET = 2
     SYMBOL_TRADE_MODE_FULL = 4
@@ -208,7 +209,7 @@ class MT5Tests(unittest.TestCase):
         agent.online.p["b2"][:] = [0, 10, 0, 0]
         meta = {"spec": asdict(b.spec), "risk": asdict(Risk()), "run_id": "fixture",
                 "synthetic": True, "features": FEATURE_NAMES}
-        with patch("fxb.mt5.load_checkpoint", return_value=(agent, reservoir, scaler, meta)), patch.object(self.bridge, "bars", return_value=b):
+        with patch.object(self.bridge, "policy", return_value=(agent, reservoir, scaler, meta, "a" * 64)), patch.object(self.bridge, "bars", return_value=b):
             with self.assertRaises(Blocked):
                 cycle(self.bridge, "fixture.npz", self.memory, 123, execute=True)
             # A deliberate fake-real fixture tests the runner, not a broker integration.

@@ -1,4 +1,4 @@
-"""Small executable surface for research, data export and supervised demo runs."""
+"""Workstation, full connectome, training, market data and controlled execution."""
 import argparse
 import json
 import os
@@ -13,8 +13,14 @@ from .mt5 import MT5, Blocked, WorkerLock, cycle, reconcile
 
 
 def parser():
-    p = argparse.ArgumentParser(description="FXB research and DEMO-only MT5 runner")
+    p = argparse.ArgumentParser(description="FXB neural trading workstation")
     commands = p.add_subparsers(dest="command", required=True)
+    c = commands.add_parser("serve", help="Open the local trading workstation")
+    c.add_argument("--port", type=int, default=8765)
+    c.add_argument("--root", default=".")
+    c.add_argument("--no-browser", action="store_true")
+    c = commands.add_parser("brain-install", help="Download the pinned full published connectome and coordinates")
+    c.add_argument("--directory", default="data/connectome")
     c = commands.add_parser("synth", help="Generate clearly labelled synthetic test bars")
     c.add_argument("--out", required=True)
     c.add_argument("--bars", type=int, default=2400)
@@ -29,6 +35,7 @@ def parser():
         g = c.add_mutually_exclusive_group()
         g.add_argument("--graph")
         g.add_argument("--plain", action="store_true", help="Train the same DQN without recurrence as a control")
+        g.add_argument("--full-brain", action="store_true", help="Use all 138,639 neurons of the published Brian2 model")
         if name == "walk-forward":
             c.add_argument("--folds", type=int, default=3)
     c = commands.add_parser("evaluate")
@@ -61,6 +68,8 @@ def parser():
     c.add_argument("--login", type=int, required=True)
     c.add_argument("--terminal")
     c.add_argument("--db", default="state/demo.sqlite")
+    c.add_argument("--mode", choices=["demo", "live"], default="demo")
+    c.add_argument("--server")
     c = commands.add_parser("memory", help="Inspect the local journal or sync its pending events to Supabase")
     c.add_argument("--db", required=True)
     c.add_argument("--sync", action="store_true")
@@ -68,11 +77,18 @@ def parser():
 
 
 def run(args):
+    if args.command == "serve":
+        from .ui import serve
+        serve(args.root, args.port, open_browser=not args.no_browser)
+        return {"status": "stopped"}
+    if args.command == "brain-install":
+        from .connectome import install
+        return install(args.directory, lambda p: print(json.dumps(p), flush=True))
     if args.command == "synth":
         save_bars(synthetic_bars(args.bars, args.seed, args.symbol), args.out)
         return {"data": args.out, "synthetic": True, "purpose": "software verification only"}
     if args.command in ("train", "walk-forward"):
-        kw = dict(epochs=args.epochs, seed=args.seed, graph=args.graph, plain=args.plain)
+        kw = dict(epochs=args.epochs, seed=args.seed, graph=args.graph, plain=args.plain, full_brain=args.full_brain)
         if args.command == "walk-forward":
             r = walk_forward(load_bars(args.data), args.out, folds=args.folds, **kw)
             return r
@@ -99,7 +115,7 @@ def run(args):
             try:
                 bridge.connect()
                 if args.command == "reconcile":
-                    return reconcile(bridge, memory, args.login)
+                    return reconcile(bridge, memory, args.login, args.mode, args.server)
                 # One policy per symbol prevents two checkpoints contending for one position.
                 from .research import load_checkpoint
                 models = [load_checkpoint(path)[3] for path in args.model]

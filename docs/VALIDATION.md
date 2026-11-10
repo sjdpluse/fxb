@@ -1,18 +1,29 @@
-# Validation record — 2026-11-09
+# Validation record — v0.2.0 — 2026-11-10 (Asia/Kabul)
 
 ## Completed in the development environment
 
-- Linux, CPython 3.12.14, NumPy 2.3.5.
-- Editable package build/install succeeded with the declared build backend.
-- `python -m unittest discover -s tests -q`: **45 core tests passed**. An additional native-SDK contract test is skipped on Linux and runs on Windows with the actual pinned MetaTrader5 wheel, without connecting to a terminal.
-- `python -m compileall -q src tests`: passed.
-- `git diff --cached --check`: passed before publication.
-- Installed CLI: synthetic generation, three training epochs, saved-model evaluation and memory inspection completed for both XAUUSD and US100 fixtures (2,400 manufactured M5 bars each). All eight command invocations exited 0. Reloaded-policy evaluation reproduced the saved holdout metrics.
-- The learning tests verify gradients numerically and demonstrate weight changes and decreasing loss on a controlled target. This establishes that learning code executes, not that it learns profitable trading.
-- Expanding walk-forward and the plain-DQN control run in the test suite. The final holdout is excluded from scaler fitting, optimizer updates and replay.
-- Tests cover future-data invariance, invalid data, lot rounding, distinct contract values, risk and margin budgets, latched drawdown stops, next-open execution, conservative ambiguous-bar exits, gap losses, short ask exits and single daily overnight charges.
-- Fake MT5 tests cover real-account rejection, wrong login, terminal restrictions, invalid/stale quotes, missing SL/TP capability, contract changes, dry-run behavior, duplicate/ambiguous/partial responses, existing exposure, manual-position ownership, calendar coverage, single-worker locks, account entry slots and synthetic-model rejection.
-- Memory tests cover persistent reservations, causal run-scoped recall, UUID reuse after a failed remote batch and backend-secret destination validation.
+- Linux, CPython 3.12.14, NumPy 2.3.5 and Brian2 2.10.1.
+- The declared workstation/brain dependencies installed in the project virtual environment. `pip check` reported no broken requirements.
+- `PYTHONPATH=src FXB_FULL_BRAIN_TEST=1 OPENBLAS_NUM_THREADS=1 .venv/bin/python -m unittest discover -s tests -v`: **63 tests run, 62 passed, one Windows-only SDK check skipped**, in 8.058 seconds on the final local run.
+- The opt-in biological integration tests load **138,639 actual neurons and 15,091,983 actual weighted connections**, verify nonzero spikes, exact reset reproducibility, learned readout weight changes and pickle-free policy save/load. All 138,639 anatomical coordinates are available; root IDs remain strings in JSON.
+- A separate cold-process test starts the workstation and initializes the entire network in a background job. This catches Brian2's requirement to install its signal handler on the main thread before background use.
+- Existing numerical-gradient, causal-feature, chronological-evaluation, risk/margin, gap/spread/cost and persistent-memory tests remain passing.
+- Live execution tests use a fake broker API: exact account acknowledgement, login/server/model/risk scope, expiry before entry and immediately before send, permitted owned-position closure after expiry, closure with exhausted margin, read-only real-account dry run, duplicate prevention and unresolved-order persistence across restarts. No test contacts a brokerage account.
+- Local HTTP tests cover private API access, token omission from public HTML, Host/Origin controls, preview mutation denial, file-boundary checks, synthetic-data rejection, background failure reporting and calendar saving during its own news blackout.
+- CLI compatibility for the original synthetic fixtures and chronological evaluation remains covered by the tests. Earlier XAUUSD/US100 manufactured-data verification runs are retained locally and clearly labelled synthetic.
+- JavaScript syntax, Python compilation and Git whitespace checks on FXB-owned files passed. The unmodified upstream files retain their original trailing whitespace and are excluded from the whitespace check so their source hashes remain exact. Windows launcher parsing and actual SDK surface checks are included in CI; see the exact workflow run for their hosted result.
+
+## Browser verification
+
+The actual FastAPI backend and frontend ran through the managed preview. This was not a static mockup and used no fabricated account telemetry.
+
+- Rendered the anatomical point cloud, rotated/reset its view and inspected a real neuron through the UI.
+- Clicked the real stimulation control for 8 windows at 200 Hz across 152 engineered inputs. The displayed last window showed **10,268 spikes, 6,616 active neurons and 160 ms total simulated time**. CPU wall time depends on hardware; the screenshot shows 0.57 seconds for that final window.
+- Selected root `720575940612058543` (model index 12973), displaying degree 231 and the strongest real directed signed connections.
+- Verified model registry, training form and full-connectome default; synthetic control results remained explicitly labelled.
+- Verified Live selection reveals exact-account acknowledgement and expiry fields while activation stays disabled without a connected account. No live activation was attempted.
+- Checked captured browser console output: no FXB application exception was observed; unrelated browser-extension metadata errors were present.
+- Screenshot: [`images/fxb-neural-workstation.png`](images/fxb-neural-workstation.png). The preview has broker mutations disabled. The normal installed workstation implements operator-controlled broker access.
 
 ## Supabase journal verification
 
@@ -24,9 +35,10 @@
 
 ## Not established by these checks
 
-- No real MT5 terminal or broker account was connected. MT5 transport tests use a fake API. No real or demo order was submitted by this development session.
-- No market-history dataset was supplied or used to establish returns. The manufactured data are labelled synthetic and cannot authorize execution.
-- No FlyWire dataset was downloaded, trained or represented as a biological simulation.
-- The Windows runtime still needs a locally configured backend secret and a real HTTP outbox sync test. SQL-level verification does not establish end-to-end client authentication or connectivity.
-- No profitability, forecast accuracy, live readiness, general intelligence or causal market understanding is claimed.
-- GitHub Actions repeats tests and CLI smoke checks on Python 3.11/3.12 for Linux/Windows, including the installed MT5 SDK surface on Windows. The initial core suite passed in all four jobs; hosted results for subsequent commits are recorded in the repository's Actions tab.
+- No real MT5 terminal or broker account was connected. Neither a real nor a demo order was submitted by this development session. The account execution path is implemented but still needs a Windows/broker integration test.
+- No genuine broker-history dataset was supplied. No full-connectome market training, market win rate or profitability has been established. A successful neural stimulation test is not financial evidence.
+- Readout weights learn; the original biological synaptic weights do not. General intelligence, causal market understanding and learned financial semantics are not claimed.
+- The full-neural encoder has a finite live restart warmup. Matching indefinitely continuous state, especially after history gaps, is not established.
+- The Windows runtime needs its backend environment variables and an actual REST outbox sync test. SQL-level verification does not establish end-to-end client connectivity.
+- Tick-level fills, broker-specific rollover/triple swap, portfolio correlation and automated calendar collection are not implemented. The current bar simulator and supplied calendar have documented limits.
+- GitHub Actions runs the core/workstation suite on Linux and Windows Python 3.11/3.12 and separately installs/downloads/tests the complete connectome on Linux Python 3.12. Hosted results are visible in the repository Actions tab; a local pass is not substituted for a hosted result.

@@ -1,4 +1,4 @@
-"""MT5 transport and demo-only execution. A real account is always rejected."""
+"""MT5 transport with separate dry-run, demo and explicitly activated live paths."""
 from dataclasses import asdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -51,7 +51,7 @@ class NewsGate:
 
     def check(self, now, horizon=0):
         if not self.path:
-            raise Blocked("A verified economic-calendar file is required for demo entries")
+            raise Blocked("A verified economic-calendar file is required for new entries")
         try:
             doc = json.loads(Path(self.path).read_text(encoding="utf-8"))
             start, end, updated = [timestamp(doc[k]) for k in ("coverage_start", "coverage_end", "updated_at")]
@@ -95,19 +95,28 @@ class MT5:
         if self.api is not None:
             self.api.shutdown()
 
-    def account(self, expected_login=None, demo=False):
+    def account(self, expected_login=None, demo=False, execution_mode=None, expected_server=None):
         account = self.api.account_info()
         terminal = self.api.terminal_info()
         if account is None or terminal is None or not terminal.connected:
             raise Blocked("MT5 account or terminal unavailable")
         if expected_login is not None and account.login != expected_login:
             raise Blocked("Connected MT5 login differs from the configured account")
-        if demo:
-            if expected_login is None or account.trade_mode != self.api.ACCOUNT_TRADE_MODE_DEMO:
-                raise Blocked("Execution is restricted to an explicitly identified DEMO account")
+        if expected_server is not None and account.server != expected_server:
+            raise Blocked("Connected MT5 server differs from the configured broker server")
+        mode = execution_mode or ("demo" if demo else None)
+        if mode:
+            if mode not in ("demo", "live"):
+                raise Blocked("Invalid execution mode")
+            required_mode = self.api.ACCOUNT_TRADE_MODE_DEMO if mode == "demo" else self.api.ACCOUNT_TRADE_MODE_REAL
+            if expected_login is None or account.trade_mode != required_mode:
+                raise Blocked(f"Execution requires the configured {mode.upper()} account")
+            if mode == "live" and not expected_server:
+                raise Blocked("The exact broker server is required for live execution")
             if not account.trade_allowed or not account.trade_expert or not terminal.trade_allowed or terminal.tradeapi_disabled:
                 raise Blocked("Terminal/account algorithmic trading permission is disabled")
-        if not all(math.isfinite(v) and v > 0 for v in (account.equity, account.margin_free)):
+        # Exhausted margin/equity must block new risk, not an owned-position close.
+        if not all(math.isfinite(v) for v in (account.equity, account.margin_free)):
             raise Blocked("Invalid equity or free margin")
         return account
 
@@ -206,8 +215,17 @@ class MT5:
                 "price": tick.bid if buy else tick.ask, "deviation": 20, "magic": MAGIC,
                 "type_time": self.api.ORDER_TIME_GTC, "type_filling": self.filling(info)}
 
-    def send_demo(self, request, key, memory, expected_login, execute=False):
-        self.account(expected_login, demo=True)
+    def send_order(self, request, key, memory, expected_login, execute=False, mode="demo",
+                   expected_server=None, authorization=None, model_hash=None, risk_config=None):
+        account = self.account(expected_login, execution_mode=mode, expected_server=expected_server)
+        if mode == "live" and execute:
+            if authorization is None:
+                raise Blocked("Live trading has not been activated by the operator")
+            try:
+                authorization.validate(account.login, account.server, model_hash, risk_config,
+                                       reducing_risk="position" in request)
+            except ValueError as e:
+                raise Blocked(str(e)) from e
         positions, orders = self.positions()
         if "position" in request:
             own = [p for p in positions if p.ticket == request["position"] and p.magic == MAGIC
@@ -238,7 +256,10 @@ class MT5:
             memory.put_state(slot, key)
         # Recheck the account and quote immediately before the only submission call.
         try:
-            self.account(expected_login, demo=True)
+            self.account(expected_login, execution_mode=mode, expected_server=expected_server)
+            if mode == "live":
+                authorization.validate(account.login, account.server, model_hash, risk_config,
+                                       reducing_risk="position" in request)
             tick = self.tick(request["symbol"])
             quote = tick.ask if request["type"] == self.api.ORDER_TYPE_BUY else tick.bid
             point = self.symbol(request["symbol"]).point
@@ -265,6 +286,20 @@ class MT5:
         memory.order_status(key, "sent", payload)
         return {"status": "sent", **payload}
 
+    def send_demo(self, request, key, memory, expected_login, execute=False):
+        """Backwards-compatible demo entry point, with no live-account fallback."""
+        return self.send_order(request, key, memory, expected_login, execute, mode="demo")
+
+    def policy(self, model_path):
+        path = Path(model_path).resolve()
+        stamp = (str(path), path.stat().st_mtime_ns, path.stat().st_size)
+        cache = getattr(self, "_policies", {})
+        if stamp not in cache:
+            cache = {k: v for k, v in cache.items() if k[0] != str(path)}
+            cache[stamp] = (*load_checkpoint(path), hashlib.sha256(path.read_bytes()).hexdigest())
+            self._policies = cache
+        return cache[stamp]
+
 
 def collect_deals(bridge, memory, account_key, now):
     deals = bridge.api.history_deals_get(datetime.fromtimestamp(now - 7 * 86400, timezone.utc),
@@ -280,15 +315,18 @@ def collect_deals(bridge, memory, account_key, now):
                           str(uuid.uuid5(uuid.NAMESPACE_URL, f"{account_key}:deal:{d.ticket}")))
 
 
-def cycle(bridge, model_path, memory, expected_login, calendar=None, execute=False, kill_file="STOP"):
-    agent, reservoir, scaler, meta = load_checkpoint(model_path)
+def cycle(bridge, model_path, memory, expected_login, calendar=None, execute=False, kill_file="STOP",
+          mode="demo", expected_server=None, authorization=None, entries_enabled=True):
+    agent, reservoir, scaler, meta, model_hash = bridge.policy(model_path)
     spec, risk = Spec(**meta["spec"]), Risk(**meta["risk"])
     now = time.time()
-    account = bridge.account(expected_login, demo=True)
+    account = bridge.account(expected_login, execution_mode=mode, expected_server=expected_server)
     if spec.currency != account.currency:
         raise Blocked("Account currency differs from training metadata")
     if execute and meta["synthetic"]:
-        raise Blocked("A model trained on synthetic prices cannot send demo orders")
+        raise Blocked("A model trained on synthetic prices cannot send broker orders")
+    send_options = dict(execute=execute, mode=mode, expected_server=expected_server,
+                        authorization=authorization, model_hash=model_hash, risk_config=meta["risk"])
     account_key = hashlib.sha256(f"{account.server}:{account.login}".encode()).hexdigest()[:20]
     collect_deals(bridge, memory, account_key, now)
     guard_key = "guard:" + account_key
@@ -314,7 +352,7 @@ def cycle(bridge, model_path, memory, expected_login, calendar=None, execute=Fal
                              or age >= risk.max_hold_bars or p.sl <= 0 or p.tp <= 0))
     if force_close:
         key = f"{account_key}:{p.ticket}:risk-close:{int(now // 300)}"
-        result = bridge.send_demo(bridge.close_request(p), key, memory, expected_login, execute)
+        result = bridge.send_order(bridge.close_request(p), key, memory, expected_login, **send_options)
         return {"action": "CLOSE", "reason": "risk_time_or_stop_file", **result}
     if stop_requested:
         return {"action": "WAIT", "reason": "stop_file"}
@@ -326,12 +364,20 @@ def cycle(bridge, model_path, memory, expected_login, calendar=None, execute=Fal
     if execute and memory.get_state("decision:" + key):
         return {"action": "WAIT", "reason": "already_processed_bar"}
     raw, atr = features(bars)
-    encoded = reservoir.encode(scaler.transform(raw))[-1]
+    normalized = scaler.transform(raw)
+    encoded = reservoir.observe(normalized, bars.time) if hasattr(reservoir, "observe") else reservoir.encode(normalized)[-1]
     side = (1 if p.type == bridge.api.POSITION_TYPE_BUY else -1) if p else 0
     state = np.r_[encoded, portfolio_state(side, age, p.profit if p else 0, account.equity, guard, risk)]
     slot = f"entry-slot:{expected_login}:{int(now // 300)}"
-    can_enter = (not positions and not pending and not guard.reason(risk)
+    can_enter = (entries_enabled and not positions and not pending and not guard.reason(risk)
                  and (not execute or memory.get_state(slot) is None))
+    if mode == "live" and execute and can_enter:
+        try:
+            if authorization is None:
+                raise ValueError("Live trading requires explicit activation")
+            authorization.validate(account.login, account.server, model_hash, meta["risk"])
+        except ValueError:
+            can_enter = False
     mask = np.asarray([True, can_enter, can_enter, bool(p)])
     action = agent.act(state, mask)
     decision = {"action": ACTION_NAMES[action], "q_values": agent.online.predict(state).tolist(),
@@ -352,19 +398,19 @@ def cycle(bridge, model_path, memory, expected_login, calendar=None, execute=Fal
             memory.record(meta["run_id"], spec.symbol, "decision", closed_at, now, veto,
                           str(uuid.uuid5(uuid.NAMESPACE_URL, key + ":veto")))
             return veto
-        result = bridge.send_demo(request, key, memory, expected_login, execute)
+        result = bridge.send_order(request, key, memory, expected_login, **send_options)
         if result["status"] == "sent":
             guard.entries += 1
             memory.put_state(guard_key, asdict(guard))
     elif action == 3:
-        result = bridge.send_demo(bridge.close_request(p), key, memory, expected_login, execute)
+        result = bridge.send_order(bridge.close_request(p), key, memory, expected_login, **send_options)
     else:
         result = {"status": "no_order"}
     return decision | result
 
 
-def reconcile(bridge, memory, expected_login):
-    account = bridge.account(expected_login, demo=True)
+def reconcile(bridge, memory, expected_login, mode="demo", expected_server=None):
+    account = bridge.account(expected_login, execution_mode=mode, expected_server=expected_server)
     account_key = hashlib.sha256(f"{account.server}:{account.login}".encode()).hexdigest()[:20]
     now = time.time()
     deals = bridge.api.history_deals_get(datetime.fromtimestamp(now - 30 * 86400, timezone.utc),

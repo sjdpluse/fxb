@@ -14,7 +14,13 @@ from .simulator import Simulator, PORTFOLIO_DIM
 def save_checkpoint(path, agent, reservoir, scaler, meta):
     path = Path(path)
     temp = path.with_suffix(".tmp.npz")
-    np.savez_compressed(temp, **agent.online.p, inputs=reservoir.inputs, recurrent=reservoir.recurrent,
+    if hasattr(reservoir, "recurrent"):
+        encoder_arrays = {"inputs": reservoir.inputs, "recurrent": reservoir.recurrent}
+    else:
+        meta = meta | {"format": 2, "encoder": {"kind": "shiu_lif_v783", "window_ms": reservoir.window_ms,
+                                                "seed": reservoir.seed, "output_dim": reservoir.output_dim}}
+        encoder_arrays = {}
+    np.savez_compressed(temp, **agent.online.p, **encoder_arrays,
                         mean=scaler.mean, scale=scaler.scale, meta=np.array(json.dumps(meta, allow_nan=False)))
     temp.replace(path)
 
@@ -22,17 +28,27 @@ def save_checkpoint(path, agent, reservoir, scaler, meta):
 def load_checkpoint(path):
     with np.load(path, allow_pickle=False) as f:
         meta = json.loads(str(f["meta"]))
-        if meta.get("feature_version") != FEATURE_VERSION or meta.get("format") != 1:
+        if meta.get("feature_version") != FEATURE_VERSION or meta.get("format") not in (1, 2):
             raise ValueError("Incompatible checkpoint")
         Risk(**meta["risk"])
         Spec(**meta["spec"])
         scaler = Scaler(f["mean"], f["scale"])
-        reservoir = Reservoir(f["inputs"], f["recurrent"], meta["topology"])
+        if meta["format"] == 2:
+            from .connectome import WholeBrain
+            reservoir = WholeBrain(window_ms=meta["encoder"]["window_ms"], seed=meta["encoder"]["seed"])
+            if (reservoir.provenance["assets"] != meta["topology"]["assets"]
+                    or reservoir.provenance["input_mapping_sha256"] != meta["topology"].get("input_mapping_sha256")):
+                raise ValueError("Brain dataset does not match the frozen policy")
+            input_dim = reservoir.output_dim + PORTFOLIO_DIM
+        else:
+            reservoir = Reservoir(f["inputs"], f["recurrent"], meta["topology"])
+            input_dim = len(FEATURE_NAMES) + len(reservoir.recurrent) + PORTFOLIO_DIM
         if (scaler.mean.shape != (len(FEATURE_NAMES),) or scaler.scale.shape != scaler.mean.shape
                 or np.any(scaler.scale <= 0) or not np.isfinite(scaler.mean).all()
-                or not np.isfinite(scaler.scale).all() or reservoir.inputs.shape[1] != len(FEATURE_NAMES)):
+                or not np.isfinite(scaler.scale).all()
+                or (meta["format"] == 1 and reservoir.inputs.shape[1] != len(FEATURE_NAMES))):
             raise ValueError("Invalid feature transform")
-        agent = DQN(len(FEATURE_NAMES) + len(reservoir.recurrent) + PORTFOLIO_DIM)
+        agent = DQN(input_dim)
         for k in agent.online.p:
             v = f[k]
             if v.shape != agent.online.p[k].shape or not np.isfinite(v).all():
@@ -58,7 +74,7 @@ def evaluate(env, agent, baseline=None):
     return env.report()
 
 
-def train(bars, output, epochs=6, seed=7, graph=None, risk=None, plain=False):
+def train(bars, output, epochs=6, seed=7, graph=None, risk=None, plain=False, full_brain=False, progress=None):
     if type(epochs) is not int or not 1 <= epochs <= 200:
         raise ValueError("epochs must be 1..200")
     risk = risk or Risk()
@@ -74,14 +90,30 @@ def train(bars, output, epochs=6, seed=7, graph=None, risk=None, plain=False):
     out.mkdir(parents=True, exist_ok=False)
     raw, atr = features(bars)
     scaler = Scaler.fit(raw[WARMUP:train_end])
-    if graph and plain:
-        raise ValueError("Choose a graph or a plain control, not both")
-    reservoir = (Reservoir(np.empty((0, len(FEATURE_NAMES))), np.empty((0, 0)),
+    if sum(bool(v) for v in (graph, plain, full_brain)) > 1:
+        raise ValueError("Choose one encoder: whole brain, supplied subgraph or plain control")
+    if full_brain:
+        from .connectome import WholeBrain
+        reservoir = WholeBrain(seed=seed)
+    else:
+        reservoir = (Reservoir(np.empty((0, len(FEATURE_NAMES))), np.empty((0, 0)),
                            {"kind": "plain_dqn_control", "biological_connectome": False}) if plain else
-                 Reservoir.load(graph) if graph else Reservoir.synthetic(len(FEATURE_NAMES), seed=seed))
-    if reservoir.inputs.shape[1] != len(FEATURE_NAMES):
+                     Reservoir.load(graph) if graph else Reservoir.synthetic(len(FEATURE_NAMES), seed=seed))
+    if not full_brain and reservoir.inputs.shape[1] != len(FEATURE_NAMES):
         raise ValueError("Graph input feature count mismatch")
-    encoded = reservoir.encode(scaler.transform(raw))
+    if full_brain:
+        normalized = scaler.transform(raw)
+        reservoir.reset()
+        encoded = np.empty((len(raw), reservoir.output_dim))
+        for i, x in enumerate(normalized):
+            encoded[i] = reservoir.step(x)
+            if i % 20 == 0 and progress:
+                progress({"stage": "brain_encoding", "completed": i + 1, "total": len(raw),
+                          "activity": {k: v for k, v in reservoir.latest.items() if k not in ("indices", "counts", "input_rates")}})
+        np.savez_compressed(out / "brain_embeddings.npz", encoded=encoded, scaler_mean=scaler.mean,
+                            scaler_scale=scaler.scale, dataset_sha256=np.array(bars.digest()))
+    else:
+        encoded = reservoir.encode(scaler.transform(raw))
     agent = DQN(encoded.shape[1] + PORTFOLIO_DIM, seed=seed)
     run_id = str(uuid.uuid4())
     meta = {"format": 1, "feature_version": FEATURE_VERSION, "features": FEATURE_NAMES,
@@ -91,7 +123,8 @@ def train(bars, output, epochs=6, seed=7, graph=None, risk=None, plain=False):
             "train_end": train_end, "validation_start": val_start, "validation_end": val_end,
             "test_start": test_start, "data_end": iso(bars.time[-1] + 300),
             "train_end_time": iso(bars.time[train_end - 1] + 300), "embargo_bars": embargo,
-            "live_approved": False, "learning": "Double-DQN nonlinear readout; fixed recurrent reservoir"}
+            "deployment_status": "requires_operator_validation", "learning": "Double-DQN nonlinear readout; frozen neural dynamics",
+            "encoder_type": "whole_brain_lif" if full_brain else "control"}
     memory = Memory(out / "memory.sqlite")
     history, best_score, best_epoch = [], -np.inf, 0
     try:
@@ -111,7 +144,7 @@ def train(bars, output, epochs=6, seed=7, graph=None, risk=None, plain=False):
                 # Store actual observed transitions once; replay is separate from the audit journal.
                 if epoch == epochs - 1:
                     memory.record(run_id, bars.spec.symbol, "experience", bars.time[at] + 300,
-                        bars.time[env.i] + 300, {"phase": "train", "state": state.tolist(),
+                        bars.time[env.i] + 300, {"phase": "train", "epoch": epoch + 1, "state": state.tolist(),
                             "next_state": nxt.tolist(), "action": action, "reward": reward,
                             "done": done, **detail})
                 state, steps = nxt, steps + 1
@@ -120,6 +153,9 @@ def train(bars, output, epochs=6, seed=7, graph=None, risk=None, plain=False):
             row = {"epoch": epoch + 1, "train": env.report(), "validation": validation,
                    "loss": float(np.mean(losses)) if losses else None, "updates": agent.updates}
             history.append(row)
+            if progress:
+                progress({"stage": "learning", "epoch": epoch + 1, "epochs": epochs, "validation": validation,
+                          "loss": row["loss"], "updates": agent.updates})
             if score > best_score:
                 best_score, best_epoch = score, epoch + 1
                 save_checkpoint(out / "model.npz", agent, reservoir, scaler,
@@ -138,12 +174,13 @@ def train(bars, output, epochs=6, seed=7, graph=None, risk=None, plain=False):
                              bars.spread * 2, Spec(**(asdict(bars.spec) | {
                                  "commission_per_lot_side": 2 * bars.spec.commission_per_lot_side,
                                  "slippage_points": 2 * bars.spec.slippage_points})), bars.source, bars.synthetic)
-    stress_raw, stress_atr = features(stress_bars)
-    stress = evaluate(Simulator(stress_bars, reservoir.encode(scaler.transform(stress_raw)), stress_atr,
-                                 test_start, n, risk), chosen)
+    # Cost shock is applied at execution while keeping observed market features frozen.
+    # This avoids claiming that a second graph traversal was performed when it was not.
+    stress = evaluate(Simulator(stress_bars, encoded, atr, test_start, n, risk), chosen)
     report = {"model": chosen_meta, "selected_epoch": best_epoch, "history": history,
               "holdout": holdout, "baselines": baselines, "double_cost_stress": stress,
-              "profitability_established": False, "real_money_supported": False,
+              "profitability_established": False, "real_money_supported": True,
+              "stress_method": "double execution costs with frozen observations",
               "limitations": ["bar-level execution approximation", "fixed contract conversion and margin snapshots",
                 "independent single-symbol research; not a joint portfolio backtest",
                 "reward is not a correctness or causal explanation label",
@@ -171,7 +208,7 @@ def evaluate_file(bars, checkpoint, forward=False):
     return evaluate(env, agent)
 
 
-def walk_forward(bars, output, folds=3, epochs=6, seed=7, graph=None, plain=False):
+def walk_forward(bars, output, folds=3, epochs=6, seed=7, graph=None, plain=False, full_brain=False):
     if not 2 <= folds <= 5:
         raise ValueError("Use 2..5 chronological folds")
     ends = [int(len(bars.time) * 0.8 ** k) for k in reversed(range(folds))]
@@ -184,7 +221,7 @@ def walk_forward(bars, output, folds=3, epochs=6, seed=7, graph=None, plain=Fals
         part = type(bars)(**{k: getattr(bars, k)[:end] for k in
                             ("time", "open", "high", "low", "close", "volume", "spread")},
                           spec=bars.spec, source=bars.source, synthetic=bars.synthetic)
-        result = train(part, root / f"fold-{i + 1}", epochs, seed, graph, plain=plain)
+        result = train(part, root / f"fold-{i + 1}", epochs, seed, graph, plain=plain, full_brain=full_brain)
         reports.append({"fold": i + 1, "test_start": result["model"]["test_start"],
                         "test_end": end, "holdout": result["holdout"], "baselines": result["baselines"]})
     summary = {"folds": reports, "synthetic": bars.synthetic, "profitability_established": False,
