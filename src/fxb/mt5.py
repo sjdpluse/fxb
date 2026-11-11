@@ -8,7 +8,9 @@ import math
 import os
 import time
 import uuid
+from types import SimpleNamespace
 import numpy as np
+from .clock import BrokerClock
 from .data import Bars, KABUL, day_key, timestamp, features
 from .risk import Spec, Guard, Risk, levels, size_lots
 from .simulator import portfolio_state, ACTION_NAMES
@@ -73,9 +75,51 @@ class NewsGate:
 
 
 class MT5:
-    def __init__(self, api=None, terminal=None):
+    def __init__(self, api=None, terminal=None, clock=None):
         self.api = api
         self.terminal = terminal
+        self.clock = clock if isinstance(clock, BrokerClock) else BrokerClock.from_config(clock)
+
+    def utc(self, value):
+        try:
+            return self.clock.to_utc(value)
+        except ValueError as e:
+            raise Blocked(str(e)) from e
+
+    def timed_record(self, record, fields):
+        changes = {}
+        for field in fields:
+            value = getattr(record, field, None)
+            if value is not None and value > 0:
+                unit = 1000 if field.endswith("_msc") else 1
+                changes[field] = int(round(self.utc(value / unit) * unit))
+        if hasattr(record, "_replace"):
+            return record._replace(**changes)
+        return SimpleNamespace(**(vars(record) | changes))
+
+    def history_deals(self, start, end):
+        try:
+            begin, finish = self.clock.query_bounds(start, end)
+        except ValueError as e:
+            raise Blocked(str(e)) from e
+        raw = self.api.history_deals_get(begin, finish)
+        if raw is None:
+            raise Blocked("Trade history unavailable; cannot reconcile realized outcomes")
+        deals = []
+        low = min(self.clock.from_utc(start), self.clock.from_utc(end))
+        high = max(self.clock.from_utc(start), self.clock.from_utc(end))
+        if self.clock.zone not in ("UTC",) and not self.clock.zone.startswith(("+", "-")):
+            low, high = low - 3600, high + 3600
+        for row in raw:
+            # Padded API queries may include rows outside the validated clock
+            # interval. Only skip those outside the requested raw-time bounds;
+            # an ambiguous time inside the interval must still fail closed.
+            if not low <= row.time <= high:
+                continue
+            normalized = self.timed_record(row, ("time", "time_msc"))
+            if start <= normalized.time <= end:
+                deals.append(normalized)
+        return tuple(deals)
 
     def connect(self):
         if self.api is None:
@@ -133,15 +177,38 @@ class MT5:
     def tick(self, symbol, now=None):
         tick = self.api.symbol_info_tick(symbol)
         now = time.time() if now is None else now
+        return self.checked_tick(tick, now)
+
+    def checked_tick(self, tick, now):
         if (tick is None or not all(math.isfinite(v) for v in (tick.bid, tick.ask, tick.time_msc))
-                or tick.bid <= 0 or tick.ask < tick.bid or not -2 <= now - tick.time_msc / 1000 <= 10):
+                or tick.bid <= 0 or tick.ask < tick.bid):
             raise Blocked("Missing, stale or invalid executable quote")
+        tick = self.timed_record(tick, ("time", "time_msc"))
+        if not -2 <= now - tick.time_msc / 1000 <= 10:
+            raise Blocked("Quote time differs from UTC or is stale; verify Windows clock and the configured broker clock policy")
         return tick
+
+    def clock_snapshot(self, symbol):
+        self.symbol(symbol)
+        raw = self.api.symbol_info_tick(symbol)
+        now = time.time()
+        result = {"symbol": symbol, "windows_utc": datetime.fromtimestamp(now, timezone.utc).isoformat(),
+                  "broker_clock": self.clock.config(), "ready": False}
+        if raw is not None:
+            result["raw_time_msc"] = raw.time_msc
+        try:
+            quote = self.checked_tick(raw, now)
+            result.update(ready=True, quote_utc=datetime.fromtimestamp(quote.time_msc / 1000, timezone.utc).isoformat(),
+                          quote_age_seconds=now - quote.time_msc / 1000)
+        except (Blocked, ValueError) as e:
+            result["reason"] = str(e)
+        return result
 
     def positions(self):
         positions, orders = self.api.positions_get(), self.api.orders_get()
         if positions is None or orders is None:
             raise Blocked("Cannot reconcile positions or pending orders")
+        positions = tuple(self.timed_record(p, ("time", "time_msc", "time_update", "time_update_msc")) for p in positions)
         return positions, orders
 
     def spec(self, symbol, commission, slippage, overnight):
@@ -159,9 +226,11 @@ class MT5:
         raw = self.api.copy_rates_from_pos(spec.symbol, self.api.TIMEFRAME_M5, 1, count)
         if raw is None or len(raw) < min(count, 512):
             raise Blocked("Insufficient closed M5 history; load more bars in MT5")
-        return Bars(raw["time"].astype(float), raw["open"], raw["high"], raw["low"], raw["close"],
+        times = np.asarray([self.utc(t) for t in raw["time"]], dtype=float)
+        return Bars(times, raw["open"], raw["high"], raw["low"], raw["close"],
                     raw["tick_volume"].astype(float), raw["spread"] * spec.point, spec,
-                    "MT5 broker bid bars; margin/tick-value snapshot; bar spread approximation", False).validate()
+                    "MT5 broker bid bars; margin/tick-value snapshot; bar spread approximation", False,
+                    {"storage": "UTC", "broker_clock": self.clock.config()}).validate()
 
     def filling(self, info):
         if info.filling_mode & 1:
@@ -302,10 +371,7 @@ class MT5:
 
 
 def collect_deals(bridge, memory, account_key, now):
-    deals = bridge.api.history_deals_get(datetime.fromtimestamp(now - 7 * 86400, timezone.utc),
-                                         datetime.fromtimestamp(now + 1, timezone.utc))
-    if deals is None:
-        raise Blocked("Trade history unavailable; cannot reconcile realized outcomes")
+    deals = bridge.history_deals(max(now - 7 * 86400, bridge.clock.lower), now + 1)
     for d in deals:
         if d.magic == MAGIC:
             payload = {k: getattr(d, k) for k in ("ticket", "position_id", "symbol", "type", "entry",
@@ -334,9 +400,7 @@ def cycle(bridge, model_path, memory, expected_login, calendar=None, execute=Fal
     guard.update(account.equity, day_key(now), risk)
     # Preserve a journaled count, but reconcile broker entries after a process crash.
     midnight = datetime.fromtimestamp(now, KABUL).replace(hour=0, minute=0, second=0, microsecond=0)
-    day_deals = bridge.api.history_deals_get(midnight.astimezone(timezone.utc), datetime.fromtimestamp(now + 1, timezone.utc))
-    if day_deals is None:
-        raise Blocked("Daily deal history unavailable")
+    day_deals = bridge.history_deals(midnight.timestamp(), now + 1)
     entry_orders = {d.order for d in day_deals if d.entry in (bridge.api.DEAL_ENTRY_IN, bridge.api.DEAL_ENTRY_INOUT)}
     guard.entries = max(guard.entries, len(entry_orders))
     memory.put_state(guard_key, asdict(guard))
@@ -356,6 +420,12 @@ def cycle(bridge, model_path, memory, expected_login, calendar=None, execute=Fal
         return {"action": "CLOSE", "reason": "risk_time_or_stop_file", **result}
     if stop_requested:
         return {"action": "WAIT", "reason": "stop_file"}
+    expected_clock = (meta.get("time_basis") or {}).get("broker_clock")
+    if expected_clock is None:
+        if bridge.clock.zone != "UTC":
+            raise Blocked("This model has no broker clock provenance; re-export data and retrain after correcting time")
+    elif not bridge.clock.compatible(expected_clock):
+        raise Blocked("Model and connected broker use different clock policies; revalidate before execution")
     bars = bridge.bars(spec)
     closed_at = bars.time[-1] + 300
     if not 0 <= now - closed_at < 300:
@@ -413,10 +483,10 @@ def reconcile(bridge, memory, expected_login, mode="demo", expected_server=None)
     account = bridge.account(expected_login, execution_mode=mode, expected_server=expected_server)
     account_key = hashlib.sha256(f"{account.server}:{account.login}".encode()).hexdigest()[:20]
     now = time.time()
-    deals = bridge.api.history_deals_get(datetime.fromtimestamp(now - 30 * 86400, timezone.utc),
-                                         datetime.fromtimestamp(now + 1, timezone.utc))
-    if deals is None:
-        raise Blocked("Cannot retrieve deal history")
+    unresolved = memory.unresolved()
+    if not unresolved:
+        return {"resolved": [], "remaining": 0, "note": "No uncertain orders to reconcile."}
+    deals = bridge.history_deals(max(now - 30 * 86400, bridge.clock.lower), now + 1)
     resolved = []
     for row in memory.unresolved():
         if not row["key"].startswith(account_key + ":"):

@@ -27,8 +27,10 @@ jobs:
         run: |
           $tokens = $null
           $parseErrors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'Start-FXB.ps1'), [ref]$tokens, [ref]$parseErrors) | Out-Null
-          if ($parseErrors.Count -gt 0) { $parseErrors | Out-String | Write-Error; exit 1 }
+          foreach ($script in @('Start-FXB.ps1', 'Update-FXB.ps1')) {
+            [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD $script), [ref]$tokens, [ref]$parseErrors) | Out-Null
+            if ($parseErrors.Count -gt 0) { $parseErrors | Out-String | Write-Error; exit 1 }
+          }
       - run: python -m fxb synth --symbol US100 --bars 1000 --out data/smoke.csv
       - run: python -m fxb train --data data/smoke.csv --out runs/smoke --epochs 1
       - run: python -m fxb evaluate --data data/smoke.csv --model runs/smoke/model.npz

@@ -16,6 +16,7 @@ import uuid
 import numpy as np
 from .connectome import WholeBrain, install, read_manifest, geometry, sha256
 from .data import load_bars, save_bars
+from .clock import BrokerClock
 from .execution import LiveAuthorization
 from .memory import Memory, SupabaseSink
 from .mt5 import MT5, Blocked, WorkerLock, cycle, reconcile, MAGIC, NewsGate
@@ -53,7 +54,8 @@ class Workstation:
         self.events = []
         self.last_error = None
         self.active_models = []
-        self.config = {"login": None, "server": "", "terminal": "", "calendar": "data/news.json"}
+        self.config = {"login": None, "server": "", "terminal": "", "calendar": "data/news.json",
+                       "broker_clock": BrokerClock().config()}
         path = self.state_dir / "workstation.json"
         if path.exists():
             self.config.update(json.loads(path.read_text(encoding="utf-8")))
@@ -117,7 +119,7 @@ class Workstation:
             news = {"ready": True, "reason": "Calendar covers the next hour"}
         except (Blocked, OSError, ValueError) as e:
             news = {"ready": False, "reason": str(e)}
-        return {"version": "0.2.0", "preview": self.preview, "platform": os.name, "news": news,
+        return {"version": "0.2.1", "preview": self.preview, "platform": os.name, "news": news,
                 "running": bool(self.worker and self.worker.is_alive()), "entries_enabled": self.entries_enabled,
                 "mode": self.mode, "account": self.account_data, "positions": self.positions, "quotes": self.quotes,
                 "models": self.models(), "datasets": self.datasets(), "active_models": self.active_models,
@@ -172,11 +174,19 @@ class Workstation:
     def configure(self, data):
         if self.job["status"] == "running" or self.worker and self.worker.is_alive():
             raise ValueError("Stop execution before changing the connected account")
-        allowed = {k: data[k] for k in ("login", "server", "terminal", "calendar") if k in data}
+        allowed = {k: data[k] for k in ("login", "server", "terminal", "calendar", "broker_clock") if k in data}
         if "login" in allowed and (type(allowed["login"]) is not int or allowed["login"] <= 0):
             raise ValueError("A positive MT5 account number is required")
         if "calendar" in allowed:
             self.resolve(allowed["calendar"], "data", must_exist=False)
+        if "broker_clock" in allowed:
+            allowed["broker_clock"] = BrokerClock.from_config(allowed["broker_clock"]).config()
+        if self.bridge:
+            self.bridge.close()
+            self.bridge = None
+            self.account_data = None
+            self.positions, self.quotes = [], {}
+        self.authorization = None
         self.config.update(allowed)
         (self.state_dir / "workstation.json").write_text(json.dumps(self.config, indent=2), encoding="utf-8")
         return self.config
@@ -192,7 +202,7 @@ class Workstation:
             self.bridge.close()
             self.bridge = None
             self.account_data = None
-        bridge = MT5(terminal=self.config["terminal"] or None)
+        bridge = MT5(terminal=self.config["terminal"] or None, clock=self.config["broker_clock"])
         bridge.connect()
         try:
             account = bridge.account(self.config["login"], expected_server=self.config["server"] or None)
@@ -241,6 +251,10 @@ class Workstation:
         bars = load_bars(data)
         if bars.synthetic:
             raise ValueError("Workstation training requires exported market data; CLI supports synthetic software fixtures")
+        clock = BrokerClock.from_config(self.config["broker_clock"])
+        source_clock = (bars.time_basis or {}).get("broker_clock")
+        if (source_clock is None and clock.zone != "UTC") or (source_clock is not None and not clock.compatible(source_clock)):
+            raise ValueError("Dataset clock differs from connection settings; export fresh data before training")
         symbol = re.sub(r"[^a-zA-Z0-9_.-]", "_", bars.spec.symbol)
         output = self.root / "runs" / f"{symbol}-{time.time_ns()}"
         def work(update):

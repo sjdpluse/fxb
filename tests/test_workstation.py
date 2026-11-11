@@ -62,6 +62,27 @@ class WorkstationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertIn("requires exported market data", response.json()["error"])
 
+    def test_clock_configuration_rejects_unbounded_offset_without_saving(self):
+        c = self.app.state.controller
+        result = self.client.post("/api/account/configure", headers=self.headers,
+            json={"login": 123, "broker_clock": {"zone": "+02:00"}})
+        self.assertEqual(result.status_code, 409)
+        self.assertIsNone(c.config["login"])
+        self.assertEqual(c.config["broker_clock"]["zone"], "UTC")
+
+    def test_legacy_dataset_is_rejected_before_expensive_training_after_clock_change(self):
+        c = self.app.state.controller
+        c.configure({"login": 123, "broker_clock": {"zone": "+02:00",
+            "valid_from": "2026-11-02T00:00:00Z", "valid_until": "2026-12-01T00:00:00Z"}})
+        # A software fixture posing as legacy market metadata exercises only
+        # the admission check; it is never trained or presented as market data.
+        fixture = synthetic_bars(800)
+        fixture.synthetic = False
+        save_bars(fixture, self.root / "data/legacy.csv")
+        with self.assertRaisesRegex(ValueError, "export fresh data"):
+            c.start_training("data/legacy.csv")
+        self.assertEqual(c.job["status"], "idle")
+
     def test_job_failure_is_visible_and_concurrent_operation_is_rejected(self):
         c = self.app.state.controller
         c.job["status"] = "running"

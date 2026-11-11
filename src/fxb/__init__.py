@@ -1,3 +1,3 @@
-"""FXB research engine. Real-money order submission is deliberately unsupported."""
+"""FXB connectome trading workstation with controlled MT5 execution."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.1"

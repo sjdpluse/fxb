@@ -1,4 +1,15 @@
-# Validation record — v0.2.0 — 2026-11-10 (Asia/Kabul)
+# Validation record
+
+## v0.2.1 — broker timestamp conversion — 2026-11-11 (Asia/Kabul)
+
+- Local suite: **76 tests run, 73 passed, 3 skipped, no failures**. The skipped cases are the Windows SDK surface check and two opt-in full-connectome integration cases; the previous full-connectome result below is not represented as a new run.
+- New regression cases cover the observed UTC+2 transport shape, rejection of stale quotes after conversion, bounded fixed offsets, different US/European DST dates, ambiguous/nonexistent civil times, UTC CSV round-trip and provenance, Kabul-midnight history filtering, one-hour position exits, incompatible legacy-model rejection, and admission checks before expensive training.
+- The read-only `clock-check` path is exercised with a fake MT5 API, including the remaining 2.4-second future-clock rejection. It sends no orders.
+- Python compilation, JavaScript syntax and Git whitespace checks passed. CI parses both Windows launch/update scripts and runs the SDK checks on Windows; refer to the commit's Actions run for hosted results.
+- No local Windows/MT5 integration, real broker order, broker annual DST rule, live slippage or market-trained profitability has been verified by these software tests. A configured fixed offset is an explicit bounded assumption, not an inferred annual broker calendar.
+- The updater pins an exact commit. Git installations require a clean tracked working tree and fast-forward; ZIP installations back up program files and preserve `data`, `runs`, `state`, `diagnostics` and `.venv`.
+
+## v0.2.0 — 2026-11-10 (Asia/Kabul)
 
 ## Completed in the development environment
 

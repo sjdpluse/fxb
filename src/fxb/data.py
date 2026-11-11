@@ -45,6 +45,7 @@ class Bars:
     spec: Spec
     source: str
     synthetic: bool
+    time_basis: dict | None = None
 
     def validate(self):
         arrays = [getattr(self, k) for k in ("time", "open", "high", "low", "close", "volume", "spread")]
@@ -61,6 +62,13 @@ class Bars:
             raise ValueError("Invalid OHLC, volume or spread")
         if not self.source or type(self.synthetic) is not bool:
             raise ValueError("Explicit source and synthetic flag required")
+        if self.time_basis is not None:
+            from .clock import BrokerClock
+            if not isinstance(self.time_basis, dict) or self.time_basis.get("storage") != "UTC":
+                raise ValueError("Converted broker bars must declare UTC storage")
+            policy = BrokerClock.from_config(self.time_basis.get("broker_clock"))
+            policy.check(float(self.time[0]))
+            policy.check(float(self.time[-1]))
         return self
 
     def digest(self):
@@ -68,6 +76,8 @@ class Bars:
         for key in ("time", "open", "high", "low", "close", "volume", "spread"):
             h.update(np.asarray(getattr(self, key), dtype="<f8").tobytes())
         h.update(json.dumps([self.source, self.synthetic]).encode())
+        if self.time_basis is not None:
+            h.update(json.dumps(self.time_basis, sort_keys=True).encode())
         return h.hexdigest()
 
 
@@ -80,7 +90,8 @@ def load_bars(path):
     with path.open(encoding="utf-8-sig", newline="") as f:
         rows = list(csv.DictReader(f))
     cols = {k: np.asarray([timestamp(r[k]) if k == "time" else float(r[k]) for r in rows]) for k in fields}
-    return Bars(**cols, spec=Spec(**meta["spec"]), source=meta["source"], synthetic=meta["synthetic"]).validate()
+    return Bars(**cols, spec=Spec(**meta["spec"]), source=meta["source"], synthetic=meta["synthetic"],
+                time_basis=meta.get("time_basis")).validate()
 
 
 def save_bars(bars, path):
@@ -95,7 +106,7 @@ def save_bars(bars, path):
             w.writerow([iso(bars.time[i])] + [getattr(bars, k)[i] for k in fields[1:]])
     path.with_suffix(".meta.json").write_text(json.dumps({
         "spec": asdict(bars.spec), "source": bars.source, "synthetic": bars.synthetic,
-        "price_basis": "bid", "spread_unit": "price"}, indent=2), encoding="utf-8")
+        "price_basis": "bid", "spread_unit": "price", "time_basis": bars.time_basis}, indent=2), encoding="utf-8")
 
 
 def synthetic_bars(count=2400, seed=7, symbol="XAUUSD"):

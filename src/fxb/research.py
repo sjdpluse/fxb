@@ -118,7 +118,8 @@ def train(bars, output, epochs=6, seed=7, graph=None, risk=None, plain=False, fu
     run_id = str(uuid.uuid4())
     meta = {"format": 1, "feature_version": FEATURE_VERSION, "features": FEATURE_NAMES,
             "run_id": run_id, "seed": seed, "synthetic": bars.synthetic,
-            "data_source": bars.source, "dataset_sha256": bars.digest(), "spec": asdict(bars.spec),
+            "data_source": bars.source, "time_basis": bars.time_basis,
+            "dataset_sha256": bars.digest(), "spec": asdict(bars.spec),
             "risk": asdict(risk), "topology": reservoir.provenance,
             "train_end": train_end, "validation_start": val_start, "validation_end": val_end,
             "test_start": test_start, "data_end": iso(bars.time[-1] + 300),
@@ -173,7 +174,7 @@ def train(bars, output, epochs=6, seed=7, graph=None, risk=None, plain=False, fu
     stress_bars = type(bars)(bars.time, bars.open, bars.high, bars.low, bars.close, bars.volume,
                              bars.spread * 2, Spec(**(asdict(bars.spec) | {
                                  "commission_per_lot_side": 2 * bars.spec.commission_per_lot_side,
-                                 "slippage_points": 2 * bars.spec.slippage_points})), bars.source, bars.synthetic)
+                                 "slippage_points": 2 * bars.spec.slippage_points})), bars.source, bars.synthetic, bars.time_basis)
     # Cost shock is applied at execution while keeping observed market features frozen.
     # This avoids claiming that a second graph traversal was performed when it was not.
     stress = evaluate(Simulator(stress_bars, encoded, atr, test_start, n, risk), chosen)
@@ -220,7 +221,7 @@ def walk_forward(bars, output, folds=3, epochs=6, seed=7, graph=None, plain=Fals
     for i, end in enumerate(ends):
         part = type(bars)(**{k: getattr(bars, k)[:end] for k in
                             ("time", "open", "high", "low", "close", "volume", "spread")},
-                          spec=bars.spec, source=bars.source, synthetic=bars.synthetic)
+                          spec=bars.spec, source=bars.source, synthetic=bars.synthetic, time_basis=bars.time_basis)
         result = train(part, root / f"fold-{i + 1}", epochs, seed, graph, plain=plain, full_brain=full_brain)
         reports.append({"fold": i + 1, "test_start": result["model"]["test_start"],
                         "test_end": end, "holdout": result["holdout"], "baselines": result["baselines"]})

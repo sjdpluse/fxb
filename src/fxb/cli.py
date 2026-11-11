@@ -10,6 +10,7 @@ from .brain import import_connectome
 from .research import train, evaluate_file, walk_forward
 from .memory import Memory, SupabaseSink
 from .mt5 import MT5, Blocked, WorkerLock, cycle, reconcile
+from .clock import BrokerClock
 
 
 def parser():
@@ -21,6 +22,9 @@ def parser():
     c.add_argument("--no-browser", action="store_true")
     c = commands.add_parser("brain-install", help="Download the pinned full published connectome and coordinates")
     c.add_argument("--directory", default="data/connectome")
+    c = commands.add_parser("clock-check", help="Read-only UTC/MT5 timestamp check using the saved workstation account")
+    c.add_argument("--root", default=".")
+    c.add_argument("--symbols", nargs="+", required=True)
     c = commands.add_parser("synth", help="Generate clearly labelled synthetic test bars")
     c.add_argument("--out", required=True)
     c.add_argument("--bars", type=int, default=2400)
@@ -73,10 +77,27 @@ def parser():
     c = commands.add_parser("memory", help="Inspect the local journal or sync its pending events to Supabase")
     c.add_argument("--db", required=True)
     c.add_argument("--sync", action="store_true")
+    for name in ("export-mt5", "demo", "reconcile"):
+        c = commands.choices[name]
+        c.add_argument("--broker-zone", default="UTC", help="UTC, a bounded offset such as +02:00, a confirmed IANA zone, or NY+7")
+        c.add_argument("--clock-valid-from", help="UTC start of the configured clock interval, inclusive")
+        c.add_argument("--clock-valid-until", help="UTC end of the configured clock interval, exclusive")
     return p
 
 
 def run(args):
+    if args.command == "clock-check":
+        config = json.loads((Path(args.root) / "state/workstation.json").read_text(encoding="utf-8-sig"))
+        if not config.get("login") or not config.get("server"):
+            raise ValueError("Save the exact MT5 account and server in the workstation first")
+        bridge = MT5(terminal=config.get("terminal") or None, clock=config.get("broker_clock"))
+        try:
+            bridge.connect()
+            bridge.account(config["login"], expected_server=config["server"])
+            quotes = [bridge.clock_snapshot(symbol) for symbol in args.symbols]
+            return {"ready": all(q["ready"] for q in quotes), "quotes": quotes, "orders_sent": 0}
+        finally:
+            bridge.close()
     if args.command == "serve":
         from .ui import serve
         serve(args.root, args.port, open_browser=not args.no_browser)
@@ -100,7 +121,7 @@ def run(args):
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
         return import_connectome(args.edges, args.provenance, args.out, len(FEATURE_NAMES), args.seed)
     if args.command == "export-mt5":
-        bridge = MT5(terminal=args.terminal)
+        bridge = MT5(terminal=args.terminal, clock=BrokerClock(args.broker_zone, args.clock_valid_from, args.clock_valid_until))
         try:
             bridge.connect()
             spec = bridge.spec(args.symbol, args.commission, args.slippage_points, args.overnight_cost)
@@ -111,7 +132,8 @@ def run(args):
             bridge.close()
     if args.command in ("demo", "reconcile"):
         with WorkerLock(args.db):
-            bridge, memory = MT5(terminal=args.terminal), Memory(args.db)
+            bridge = MT5(terminal=args.terminal, clock=BrokerClock(args.broker_zone, args.clock_valid_from, args.clock_valid_until))
+            memory = Memory(args.db)
             try:
                 bridge.connect()
                 if args.command == "reconcile":
