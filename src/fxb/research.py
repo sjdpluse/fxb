@@ -2,13 +2,15 @@
 from dataclasses import asdict
 from pathlib import Path
 import json
+import time
 import uuid
 import numpy as np
 from .brain import DQN, Reservoir
 from .data import features, Scaler, WARMUP, FEATURE_VERSION, FEATURE_NAMES, iso
 from .memory import Memory
 from .risk import Risk, Spec
-from .simulator import Simulator, PORTFOLIO_DIM
+from .simulator import Simulator, PORTFOLIO_DIM, EXECUTION_VERSION
+from .rollover import Rollover
 
 
 def save_checkpoint(path, agent, reservoir, scaler, meta):
@@ -74,10 +76,14 @@ def evaluate(env, agent, baseline=None):
     return env.report()
 
 
-def train(bars, output, epochs=6, seed=7, graph=None, risk=None, plain=False, full_brain=False, progress=None):
+def train(bars, output, epochs=6, seed=7, graph=None, risk=None, plain=False, full_brain=False,
+          progress=None, initial=10_000):
     if type(epochs) is not int or not 1 <= epochs <= 200:
         raise ValueError("epochs must be 1..200")
     risk = risk or Risk()
+    bars.validate()
+    if not np.isfinite(initial) or initial <= 0:
+        raise ValueError("Initial balance must be positive")
     n = len(bars.time)
     if n < 800:
         raise ValueError("At least 800 M5 bars required for a smoke run; real research needs much more")
@@ -103,12 +109,16 @@ def train(bars, output, epochs=6, seed=7, graph=None, risk=None, plain=False, fu
         raise ValueError("Graph input feature count mismatch")
     if full_brain:
         normalized = scaler.transform(raw)
+        started = time.monotonic()
         reservoir.reset()
         encoded = np.empty((len(raw), reservoir.output_dim))
         for i, x in enumerate(normalized):
             encoded[i] = reservoir.step(x)
-            if i % 20 == 0 and progress:
+            if (i % 20 == 0 or i == len(raw) - 1) and progress:
+                elapsed = time.monotonic() - started
                 progress({"stage": "brain_encoding", "completed": i + 1, "total": len(raw),
+                          "elapsed_seconds": elapsed,
+                          "remaining_seconds_estimate": elapsed / (i + 1) * (len(raw) - i - 1),
                           "activity": {k: v for k, v in reservoir.latest.items() if k not in ("indices", "counts", "input_rates")}})
         np.savez_compressed(out / "brain_embeddings.npz", encoded=encoded, scaler_mean=scaler.mean,
                             scaler_scale=scaler.scale, dataset_sha256=np.array(bars.digest()))
@@ -119,6 +129,8 @@ def train(bars, output, epochs=6, seed=7, graph=None, risk=None, plain=False, fu
     meta = {"format": 1, "feature_version": FEATURE_VERSION, "features": FEATURE_NAMES,
             "run_id": run_id, "seed": seed, "synthetic": bars.synthetic,
             "data_source": bars.source, "time_basis": bars.time_basis,
+            "assumptions": bars.assumptions, "rollover": Rollover.from_config(bars.rollover).config(),
+            "execution_version": EXECUTION_VERSION, "initial_balance": initial,
             "dataset_sha256": bars.digest(), "spec": asdict(bars.spec),
             "risk": asdict(risk), "topology": reservoir.provenance,
             "train_end": train_end, "validation_start": val_start, "validation_end": val_end,
@@ -130,7 +142,7 @@ def train(bars, output, epochs=6, seed=7, graph=None, risk=None, plain=False, fu
     history, best_score, best_epoch = [], -np.inf, 0
     try:
         for epoch in range(epochs):
-            env = Simulator(bars, encoded, atr, WARMUP, train_end, risk)
+            env = Simulator(bars, encoded, atr, WARMUP, train_end, risk, initial)
             state, done, losses, steps = env.reset(), False, [], 0
             while not done:
                 at = env.i
@@ -149,7 +161,7 @@ def train(bars, output, epochs=6, seed=7, graph=None, risk=None, plain=False, fu
                             "next_state": nxt.tolist(), "action": action, "reward": reward,
                             "done": done, **detail})
                 state, steps = nxt, steps + 1
-            validation = evaluate(Simulator(bars, encoded, atr, val_start, val_end, risk), agent)
+            validation = evaluate(Simulator(bars, encoded, atr, val_start, val_end, risk, initial), agent)
             score = validation["return_pct"] - 2 * validation["max_drawdown_pct"]
             row = {"epoch": epoch + 1, "train": env.report(), "validation": validation,
                    "loss": float(np.mean(losses)) if losses else None, "updates": agent.updates}
@@ -166,23 +178,26 @@ def train(bars, output, epochs=6, seed=7, graph=None, risk=None, plain=False, fu
     finally:
         memory.close()
     chosen, _, _, chosen_meta = load_checkpoint(out / "model.npz")
-    test_env = Simulator(bars, encoded, atr, test_start, n, risk)
+    test_env = Simulator(bars, encoded, atr, test_start, n, risk, initial)
     holdout = evaluate(test_env, chosen)
-    baselines = {name: evaluate(Simulator(bars, encoded, atr, test_start, n, risk), chosen, name)
+    baselines = {name: evaluate(Simulator(bars, encoded, atr, test_start, n, risk, initial), chosen, name)
                  for name in ("flat", "trend")}
     # Stress exactly the frozen policy, with doubled costs. No model selection on this result.
     stress_bars = type(bars)(bars.time, bars.open, bars.high, bars.low, bars.close, bars.volume,
                              bars.spread * 2, Spec(**(asdict(bars.spec) | {
                                  "commission_per_lot_side": 2 * bars.spec.commission_per_lot_side,
-                                 "slippage_points": 2 * bars.spec.slippage_points})), bars.source, bars.synthetic, bars.time_basis)
+                                 "slippage_points": 2 * bars.spec.slippage_points,
+                                 "overnight_cost_per_lot": 2 * bars.spec.overnight_cost_per_lot})),
+                             bars.source, bars.synthetic, bars.time_basis, bars.rollover, bars.assumptions)
     # Cost shock is applied at execution while keeping observed market features frozen.
     # This avoids claiming that a second graph traversal was performed when it was not.
-    stress = evaluate(Simulator(stress_bars, encoded, atr, test_start, n, risk), chosen)
+    stress = evaluate(Simulator(stress_bars, encoded, atr, test_start, n, risk, initial), chosen)
     report = {"model": chosen_meta, "selected_epoch": best_epoch, "history": history,
               "holdout": holdout, "baselines": baselines, "double_cost_stress": stress,
               "profitability_established": False, "real_money_supported": True,
               "stress_method": "double execution costs with frozen observations",
               "limitations": ["bar-level execution approximation", "fixed contract conversion and margin snapshots",
+                "funding is an explicit cost scenario, not a reconstructed historical broker tariff",
                 "independent single-symbol research; not a joint portfolio backtest",
                 "reward is not a correctness or causal explanation label",
                 "one holdout is insufficient for deployment; conduct rolling out-of-sample studies and demo forward tests"]}
@@ -193,6 +208,10 @@ def train(bars, output, epochs=6, seed=7, graph=None, risk=None, plain=False, fu
 
 def evaluate_file(bars, checkpoint, forward=False):
     agent, reservoir, scaler, meta = load_checkpoint(checkpoint)
+    if meta.get("execution_version") != EXECUTION_VERSION:
+        raise ValueError("Checkpoint uses an older execution simulator; retrain before comparing reports")
+    if Rollover.from_config(bars.rollover).config() != meta.get("rollover"):
+        raise ValueError("Rollover assumptions changed; perform a new documented experiment")
     if asdict(bars.spec) != meta["spec"]:
         raise ValueError("Contract/cost metadata differs; perform a new documented experiment")
     if forward:
@@ -205,11 +224,13 @@ def evaluate_file(bars, checkpoint, forward=False):
             raise ValueError("Dataset changed; use a strictly later --forward dataset")
         start = meta["test_start"]
     raw, atr = features(bars)
-    env = Simulator(bars, reservoir.encode(scaler.transform(raw)), atr, start, len(bars.time), Risk(**meta["risk"]))
+    env = Simulator(bars, reservoir.encode(scaler.transform(raw)), atr, start, len(bars.time),
+                    Risk(**meta["risk"]), meta["initial_balance"])
     return evaluate(env, agent)
 
 
-def walk_forward(bars, output, folds=3, epochs=6, seed=7, graph=None, plain=False, full_brain=False):
+def walk_forward(bars, output, folds=3, epochs=6, seed=7, graph=None, plain=False, full_brain=False,
+                 initial=10_000, progress=None):
     if not 2 <= folds <= 5:
         raise ValueError("Use 2..5 chronological folds")
     ends = [int(len(bars.time) * 0.8 ** k) for k in reversed(range(folds))]
@@ -221,11 +242,14 @@ def walk_forward(bars, output, folds=3, epochs=6, seed=7, graph=None, plain=Fals
     for i, end in enumerate(ends):
         part = type(bars)(**{k: getattr(bars, k)[:end] for k in
                             ("time", "open", "high", "low", "close", "volume", "spread")},
-                          spec=bars.spec, source=bars.source, synthetic=bars.synthetic, time_basis=bars.time_basis)
-        result = train(part, root / f"fold-{i + 1}", epochs, seed, graph, plain=plain, full_brain=full_brain)
+                          spec=bars.spec, source=bars.source, synthetic=bars.synthetic, time_basis=bars.time_basis,
+                          rollover=bars.rollover, assumptions=bars.assumptions)
+        result = train(part, root / f"fold-{i + 1}", epochs, seed, graph, plain=plain, full_brain=full_brain,
+                       initial=initial, progress=progress)
         reports.append({"fold": i + 1, "test_start": result["model"]["test_start"],
                         "test_end": end, "holdout": result["holdout"], "baselines": result["baselines"]})
     summary = {"folds": reports, "synthetic": bars.synthetic, "profitability_established": False,
-               "note": "Expanding histories with separate nonoverlapping test windows; each fold starts with 10,000 units."}
+               "initial_balance": initial,
+               "note": "Expanding histories with separate nonoverlapping test windows; each fold starts with the declared initial balance."}
     (root / "walk_forward.json").write_text(json.dumps(summary, indent=2, allow_nan=False), encoding="utf-8")
     return summary

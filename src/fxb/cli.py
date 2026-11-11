@@ -36,6 +36,8 @@ def parser():
         c.add_argument("--out", required=True)
         c.add_argument("--epochs", type=int, default=6)
         c.add_argument("--seed", type=int, default=7)
+        c.add_argument("--initial-balance", type=float, default=10_000,
+                       help="Starting account-currency balance for each independent partition")
         g = c.add_mutually_exclusive_group()
         g.add_argument("--graph")
         g.add_argument("--plain", action="store_true", help="Train the same DQN without recurrence as a control")
@@ -109,7 +111,11 @@ def run(args):
         save_bars(synthetic_bars(args.bars, args.seed, args.symbol), args.out)
         return {"data": args.out, "synthetic": True, "purpose": "software verification only"}
     if args.command in ("train", "walk-forward"):
-        kw = dict(epochs=args.epochs, seed=args.seed, graph=args.graph, plain=args.plain, full_brain=args.full_brain)
+        def progress(event):
+            if event["stage"] == "brain_encoding":
+                print(json.dumps({k: v for k, v in event.items() if k != "activity"}), flush=True)
+        kw = dict(epochs=args.epochs, seed=args.seed, graph=args.graph, plain=args.plain,
+                  full_brain=args.full_brain, initial=args.initial_balance, progress=progress)
         if args.command == "walk-forward":
             r = walk_forward(load_bars(args.data), args.out, folds=args.folds, **kw)
             return r

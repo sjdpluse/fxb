@@ -4,10 +4,12 @@ Bid OHLC cannot identify intrabar order. If both barriers hit, assume stop first
 Contract conversions/margin are snapshots; this is not a tick-accurate broker.
 """
 from dataclasses import dataclass, asdict
-from datetime import date
 import numpy as np
 from .data import day_key, iso
 from .risk import Guard, Risk, levels, size_lots
+from .rollover import Rollover
+
+EXECUTION_VERSION = "m5-bid-explicit-rollover-v2"
 
 WAIT, LONG, SHORT, CLOSE = range(4)
 ACTION_NAMES = ["WAIT", "LONG", "SHORT", "CLOSE"]
@@ -40,6 +42,7 @@ class Simulator:
         self.bars, self.x, self.atr = bars, encoded, atr
         self.start, self.end = start, end
         self.risk = risk or Risk()
+        self.rollover = Rollover.from_config(bars.rollover)
         if not np.isfinite(initial) or initial <= 0:
             raise ValueError("Initial balance must be positive")
         self.initial = initial
@@ -92,9 +95,9 @@ class Simulator:
         opened = False
         if self.position:
             p = self.position
-            nights = (date.fromisoformat(day_key(b.time[j])) - date.fromisoformat(day_key(b.time[self.i]))).days
-            if nights > 0:
-                fee = p.lots * spec.overnight_cost_per_lot * nights
+            funding_units = self.rollover.units(float(b.time[self.i]), float(b.time[j]))
+            if funding_units > 0:
+                fee = p.lots * spec.overnight_cost_per_lot * funding_units
                 self.balance -= fee
                 p.fees += fee
             # All close decisions were known before this opening price.

@@ -14,6 +14,7 @@ import threading
 import time
 import uuid
 import numpy as np
+from . import __version__
 from .connectome import WholeBrain, install, read_manifest, geometry, sha256
 from .data import load_bars, save_bars
 from .clock import BrokerClock
@@ -91,7 +92,7 @@ class Workstation:
 
     def datasets(self):
         result = []
-        for path in sorted((self.root / "data").glob("*.meta.json")):
+        for path in sorted((self.root / "data").glob("**/*.meta.json")):
             csv_path = path.with_name(path.name.replace(".meta.json", ".csv"))
             if csv_path.exists():
                 meta = json.loads(path.read_text(encoding="utf-8"))
@@ -119,7 +120,7 @@ class Workstation:
             news = {"ready": True, "reason": "Calendar covers the next hour"}
         except (Blocked, OSError, ValueError) as e:
             news = {"ready": False, "reason": str(e)}
-        return {"version": "0.2.2", "preview": self.preview, "platform": os.name, "news": news,
+        return {"version": __version__, "preview": self.preview, "platform": os.name, "news": news,
                 "running": bool(self.worker and self.worker.is_alive()), "entries_enabled": self.entries_enabled,
                 "mode": self.mode, "account": self.account_data, "positions": self.positions, "quotes": self.quotes,
                 "models": self.models(), "datasets": self.datasets(), "active_models": self.active_models,

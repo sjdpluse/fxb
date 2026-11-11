@@ -27,7 +27,7 @@ jobs:
         run: |
           $tokens = $null
           $parseErrors = $null
-          foreach ($script in @('Start-FXB.ps1', 'Update-FXB.ps1')) {
+          foreach ($script in @('Start-FXB.ps1', 'Update-FXB.ps1', 'Start-FXB-Training.ps1')) {
             [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD $script), [ref]$tokens, [ref]$parseErrors) | Out-Null
             if ($parseErrors.Count -gt 0) { $parseErrors | Out-String | Write-Error; exit 1 }
           }

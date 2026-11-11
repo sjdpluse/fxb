@@ -1,5 +1,16 @@
 # Validation record
 
+## v0.2.3 — prepared market data and funding schedule — 2026-11-11 (Asia/Kabul)
+
+- Added offline raw-archive preparation with SHA-256 verification, explicit historical clock/cost evidence, exact contract units, UTC timestamps, preserved gaps, round-trip validation and atomic non-overwriting output. Assumptions participate in dataset hashes and are retained in model metadata. Imported nested datasets are listed by the workstation.
+- Separated simulator funding cutoffs from the Kabul risk day. Explicit time-zone schedules support weekday weights and the previous-day convention for midnight funding. Legacy datasets use a documented UTC-midnight daily scenario, not an inferred broker tariff. Reports record the execution version; historical checkpoints cannot silently be re-evaluated under the new simulator.
+- Added an explicit initial balance to training, evaluation and walk-forward folds; every partition and control uses the same declared value. Cost stress now doubles overnight charges as well as spread, commission and slippage.
+- Added whole-brain progress/ETA output and a Windows launcher that verifies prepared dataset hashes, trains symbols sequentially and packages reports without changing MT5 account settings or sending orders. Interrupted encoding is not resumable.
+- Local suite: **92 tests run, 88 passed, 4 skipped, no failures**. Skips are the two Windows SDK checks and two opt-in full-brain cases. New regression coverage includes summer/winter archive conversion, corrupted CSV rejection, quote/clock inconsistency, assumption hashing, Kabul risk midnight without an unrelated funding charge, triple rollover, weekend gaps and ambiguous DST cutoffs.
+- Processed the user's supplied real M5 archive and completed ten-epoch plain-DQN control runs with chronological train/validation/holdout partitions. Those control runs are not whole-connectome training, and their results do not establish profitability. Private account inputs and data are delivered separately rather than committed to the repository.
+- A 20-observation full-connectome timing probe with real market features averaged about 0.46 seconds per observation on this host using the default NumPy backend. This is a short hardware-dependent timing sample, not completed market training or an estimate guaranteed for the user's Windows device.
+- The broker's historical DST calendar, exact funding cutoff, historical tariffs and realized slippage remain unconfirmed. Supplied preparation assumptions are explicitly labelled; current quote conversion alone does not prove the annual rule. The full market-history connectome training must still be run.
+
 ## Raw market-data export — 2026-11-11 (Asia/Kabul)
 
 - The user reported three successful Windows MT5 clock checks for `XAUUSD.m` and `US100.std`, with zero orders sent, and then both native-machine full-connectome integration tests passing in **55.228 seconds**. The reported Pyparsing deprecation warning did not fail those tests. These are user-provided runtime results, distinct from hosted CI.

@@ -46,6 +46,8 @@ class Bars:
     source: str
     synthetic: bool
     time_basis: dict | None = None
+    rollover: dict | None = None
+    assumptions: dict | None = None
 
     def validate(self):
         arrays = [getattr(self, k) for k in ("time", "open", "high", "low", "close", "volume", "spread")]
@@ -69,6 +71,13 @@ class Bars:
             policy = BrokerClock.from_config(self.time_basis.get("broker_clock"))
             policy.check(float(self.time[0]))
             policy.check(float(self.time[-1]))
+        if self.rollover is not None:
+            from .rollover import Rollover
+            Rollover.from_config(self.rollover)
+        if self.assumptions is not None:
+            if not isinstance(self.assumptions, dict):
+                raise ValueError("Dataset assumptions must be an object")
+            json.dumps(self.assumptions, allow_nan=False)
         return self
 
     def digest(self):
@@ -78,6 +87,9 @@ class Bars:
         h.update(json.dumps([self.source, self.synthetic]).encode())
         if self.time_basis is not None:
             h.update(json.dumps(self.time_basis, sort_keys=True).encode())
+        for key in ("rollover", "assumptions"):
+            if getattr(self, key) is not None:
+                h.update(json.dumps({key: getattr(self, key)}, sort_keys=True).encode())
         return h.hexdigest()
 
 
@@ -91,7 +103,8 @@ def load_bars(path):
         rows = list(csv.DictReader(f))
     cols = {k: np.asarray([timestamp(r[k]) if k == "time" else float(r[k]) for r in rows]) for k in fields}
     return Bars(**cols, spec=Spec(**meta["spec"]), source=meta["source"], synthetic=meta["synthetic"],
-                time_basis=meta.get("time_basis")).validate()
+                time_basis=meta.get("time_basis"), rollover=meta.get("rollover"),
+                assumptions=meta.get("assumptions")).validate()
 
 
 def save_bars(bars, path):
@@ -106,7 +119,8 @@ def save_bars(bars, path):
             w.writerow([iso(bars.time[i])] + [getattr(bars, k)[i] for k in fields[1:]])
     path.with_suffix(".meta.json").write_text(json.dumps({
         "spec": asdict(bars.spec), "source": bars.source, "synthetic": bars.synthetic,
-        "price_basis": "bid", "spread_unit": "price", "time_basis": bars.time_basis}, indent=2), encoding="utf-8")
+        "price_basis": "bid", "spread_unit": "price", "time_basis": bars.time_basis,
+        "rollover": bars.rollover, "assumptions": bars.assumptions}, indent=2), encoding="utf-8")
 
 
 def synthetic_bars(count=2400, seed=7, symbol="XAUUSD"):

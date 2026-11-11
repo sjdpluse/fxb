@@ -155,8 +155,8 @@ class SimulatorTests(unittest.TestCase):
 
     def test_overnight_cost_is_charged_once_per_day_crossing(self):
         env = self.make_env()
-        # Entry at 23:55 Kabul; subsequent observations remain on the next day.
-        shift = timestamp("2026-11-09T23:55:00+04:30") - env.bars.time[65]
+        # Unspecified funding uses an explicit UTC-midnight scenario, not the risk day.
+        shift = timestamp("2026-11-09T23:55:00Z") - env.bars.time[65]
         env.bars.time = env.bars.time + shift
         env.reset()
         env.step(1)
@@ -167,6 +167,16 @@ class SimulatorTests(unittest.TestCase):
         charged = env.position.fees
         env.step(0)
         self.assertAlmostEqual(env.position.fees, charged)
+
+    def test_kabul_risk_midnight_does_not_charge_utc_funding(self):
+        env = self.make_env()
+        env.bars.time += timestamp("2026-11-09T23:55:00+04:30") - env.bars.time[65]
+        env.reset()
+        env.step(1)
+        fee = env.position.fees
+        env.step(0)
+        self.assertEqual(env.position.fees, fee)
+        self.assertEqual(env.guard.day, "2026-11-10")
 
 
 class LearningTests(unittest.TestCase):
@@ -218,14 +228,18 @@ class LearningTests(unittest.TestCase):
     def test_full_training_holdout_and_reload(self):
         with tempfile.TemporaryDirectory() as d, contextlib.redirect_stdout(io.StringIO()):
             b = synthetic_bars(800)
+            b.assumptions = {"costs": "declared test scenario"}
             out = Path(d) / "run"
-            result = train(b, out, epochs=2)
+            result = train(b, out, epochs=2, initial=2455.72)
             agent, reservoir, scaler, meta = load_checkpoint(out / "model.npz")
             raw, _ = features(b)
             np.testing.assert_allclose(scaler.mean, raw[64:meta["train_end"]].mean(axis=0))
             self.assertLess(meta["train_end"], meta["validation_start"])
             self.assertLess(meta["validation_end"], meta["test_start"])
             self.assertGreater(meta["updates"], 0)
+            self.assertEqual(meta["initial_balance"], 2455.72)
+            self.assertEqual(meta["assumptions"], b.assumptions)
+            self.assertEqual(result["baselines"]["flat"]["final_equity"], 2455.72)
             report = evaluate_file(b, out / "model.npz")
             self.assertEqual(report, result["holdout"])
             b.close[-1] += 0.001
