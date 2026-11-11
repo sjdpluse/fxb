@@ -119,7 +119,7 @@ class Workstation:
             news = {"ready": True, "reason": "Calendar covers the next hour"}
         except (Blocked, OSError, ValueError) as e:
             news = {"ready": False, "reason": str(e)}
-        return {"version": "0.2.1", "preview": self.preview, "platform": os.name, "news": news,
+        return {"version": "0.2.2", "preview": self.preview, "platform": os.name, "news": news,
                 "running": bool(self.worker and self.worker.is_alive()), "entries_enabled": self.entries_enabled,
                 "mode": self.mode, "account": self.account_data, "positions": self.positions, "quotes": self.quotes,
                 "models": self.models(), "datasets": self.datasets(), "active_models": self.active_models,

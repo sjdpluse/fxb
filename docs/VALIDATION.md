@@ -1,5 +1,14 @@
 # Validation record
 
+## v0.2.2 — native MT5 record compatibility — 2026-11-11 (Asia/Kabul)
+
+- Reproduced the reported `vars() argument must have __dict__ attribute` failure for tick, position and deal records before changing the adapter. The previous portable tests used Python namespaces and did not cover the extension record protocol.
+- The adapter now reads native records through their documented `_asdict()` method, copies all fields and changes only the requested timestamp fields. Existing Python namedtuple/namespace inputs remain supported; unknown record layouts are rejected explicitly.
+- Local suite: **80 tests run, 76 passed, 4 skipped, no failures**. The skipped cases are two Windows SDK checks and two opt-in full-connectome integration cases. Python compilation and Git whitespace checks passed.
+- Regression coverage checks `clock-check` with records lacking both `__dict__` and `_replace`, millisecond precision, stale/future-quote rejection, position age, history filtering, and preservation of prices, costs and integer identifiers above 2^53. The fixtures send no orders.
+- Windows CI additionally constructs the actual SDK `Tick`, `TradePosition` and `TradeDeal` extension types and exercises their timestamp conversion without initializing a terminal. Refer to this commit's Actions results for the native test outcome; a connected broker session still requires the user's read-only `clock-check`.
+- No dependency, trading limit, clock policy, account setting or persisted model/data format changed in this patch.
+
 ## v0.2.1 — broker timestamp conversion — 2026-11-11 (Asia/Kabul)
 
 - Local suite: **76 tests run, 73 passed, 3 skipped, no failures**. The skipped cases are the Windows SDK surface check and two opt-in full-connectome integration cases; the previous full-connectome result below is not represented as a new run.

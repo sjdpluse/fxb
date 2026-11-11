@@ -95,7 +95,16 @@ class MT5:
                 changes[field] = int(round(self.utc(value / unit) * unit))
         if hasattr(record, "_replace"):
             return record._replace(**changes)
-        return SimpleNamespace(**(vars(record) | changes))
+        # MT5's native Tick/TradePosition/TradeDeal records expose _asdict(),
+        # but do not have the __dict__ or _replace of our Python test doubles.
+        as_dict = getattr(record, "_asdict", None)
+        if callable(as_dict):
+            values = as_dict()
+        elif hasattr(record, "__dict__"):
+            values = vars(record)
+        else:
+            raise Blocked(f"Unsupported MT5 record type: {type(record).__name__}")
+        return SimpleNamespace(**(values | changes))
 
     def history_deals(self, start, end):
         try:
