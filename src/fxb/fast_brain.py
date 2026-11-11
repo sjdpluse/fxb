@@ -98,7 +98,7 @@ class FastWholeBrain(WholeBrain):
 
     def __init__(self, directory=None, window_ms=20, seed=7):
         super().__init__(directory, window_ms, seed)
-        if not np.isclose(self.window_ms / .1, round(self.window_ms / .1), atol=1e-10):
+        if not np.isclose(self.window_ms / .1, round(self.window_ms / .1), rtol=0, atol=1e-10):
             raise ValueError("Compiled neural window must be aligned to 0.1 ms")
         self.provenance = self.provenance | {"implementation": IMPLEMENTATION,
                                            "reference": "Brian2 NumPy, pinned Shiu equations"}

@@ -45,6 +45,8 @@ class CompiledKernelTests(unittest.TestCase):
 class CompiledWholeBrainTests(unittest.TestCase):
     def test_full_graph_matches_brian2_spikes_embeddings_and_states(self):
         from fxb.connectome import WholeBrain
+        with self.assertRaisesRegex(ValueError, "aligned"):
+            FastWholeBrain(window_ms=20.0001)
         ref, fast = WholeBrain(), FastWholeBrain()
         ref.reset()
         fast.reset()
