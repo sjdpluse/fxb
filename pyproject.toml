@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fxb"
-version = "0.2.3"
+version = "0.2.4"
 description = "Connectome trading workstation with whole-brain simulation and controlled MT5 execution"
 requires-python = ">=3.11"
 dependencies = ["numpy==2.3.5", "tzdata==2026.6"]
 
 [project.optional-dependencies]
 mt5 = ["MetaTrader5==5.0.6231; platform_system == 'Windows'"]
-brain = ["brian2==2.10.1", "pyarrow==26.0.1", "pandas==2.2.3", "scipy==1.17.0", "joblib==1.5.3"]
+brain = ["brian2==2.10.1", "pyarrow==26.0.1", "pandas==2.2.3", "scipy==1.17.0", "joblib==1.5.3", "numba==0.64.0", "llvmlite==0.46.0"]
 desktop = ["fastapi==0.162.2", "starlette==1.10.0", "uvicorn==0.54.0", "httpx==0.28.1"]
 
 [project.scripts]

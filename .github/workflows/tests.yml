@@ -35,7 +35,10 @@ jobs:
       - run: python -m fxb train --data data/smoke.csv --out runs/smoke --epochs 1
       - run: python -m fxb evaluate --data data/smoke.csv --model runs/smoke/model.npz
   full-connectome:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     env:
       OPENBLAS_NUM_THREADS: '1'
@@ -48,3 +51,4 @@ jobs:
       - run: python -m pip install -e ".[brain,desktop]"
       - run: python -m fxb brain-install
       - run: python -m unittest discover -s tests -p test_full_brain.py -v
+      - run: python -m unittest discover -s tests -p test_fast_brain.py -v

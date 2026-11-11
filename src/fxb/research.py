@@ -20,7 +20,8 @@ def save_checkpoint(path, agent, reservoir, scaler, meta):
         encoder_arrays = {"inputs": reservoir.inputs, "recurrent": reservoir.recurrent}
     else:
         meta = meta | {"format": 2, "encoder": {"kind": "shiu_lif_v783", "window_ms": reservoir.window_ms,
-                                                "seed": reservoir.seed, "output_dim": reservoir.output_dim}}
+                                                "seed": reservoir.seed, "output_dim": reservoir.output_dim,
+                                                "implementation": getattr(reservoir, "implementation", "brian2")}}
         encoder_arrays = {}
     np.savez_compressed(temp, **agent.online.p, **encoder_arrays,
                         mean=scaler.mean, scale=scaler.scale, meta=np.array(json.dumps(meta, allow_nan=False)))
@@ -37,7 +38,15 @@ def load_checkpoint(path):
         scaler = Scaler(f["mean"], f["scale"])
         if meta["format"] == 2:
             from .connectome import WholeBrain
-            reservoir = WholeBrain(window_ms=meta["encoder"]["window_ms"], seed=meta["encoder"]["seed"])
+            implementation = meta["encoder"].get("implementation", "brian2")
+            if implementation == "brian2":
+                encoder_class = WholeBrain
+            else:
+                from .fast_brain import FastWholeBrain, IMPLEMENTATION
+                if implementation != IMPLEMENTATION or meta["topology"].get("implementation") != IMPLEMENTATION:
+                    raise ValueError("Unknown or inconsistent whole-brain implementation")
+                encoder_class = FastWholeBrain
+            reservoir = encoder_class(window_ms=meta["encoder"]["window_ms"], seed=meta["encoder"]["seed"])
             if (reservoir.provenance["assets"] != meta["topology"]["assets"]
                     or reservoir.provenance["input_mapping_sha256"] != meta["topology"].get("input_mapping_sha256")):
                 raise ValueError("Brain dataset does not match the frozen policy")
@@ -77,7 +86,7 @@ def evaluate(env, agent, baseline=None):
 
 
 def train(bars, output, epochs=6, seed=7, graph=None, risk=None, plain=False, full_brain=False,
-          progress=None, initial=10_000):
+          progress=None, initial=10_000, fast_brain=False, encoding_cache=None):
     if type(epochs) is not int or not 1 <= epochs <= 200:
         raise ValueError("epochs must be 1..200")
     risk = risk or Risk()
@@ -96,11 +105,16 @@ def train(bars, output, epochs=6, seed=7, graph=None, risk=None, plain=False, fu
     out.mkdir(parents=True, exist_ok=False)
     raw, atr = features(bars)
     scaler = Scaler.fit(raw[WARMUP:train_end])
-    if sum(bool(v) for v in (graph, plain, full_brain)) > 1:
+    if sum(bool(v) for v in (graph, plain, full_brain, fast_brain)) > 1:
         raise ValueError("Choose one encoder: whole brain, supplied subgraph or plain control")
+    full_brain = full_brain or fast_brain
     if full_brain:
-        from .connectome import WholeBrain
-        reservoir = WholeBrain(seed=seed)
+        if fast_brain:
+            from .fast_brain import FastWholeBrain
+            reservoir = FastWholeBrain(seed=seed)
+        else:
+            from .connectome import WholeBrain
+            reservoir = WholeBrain(seed=seed)
     else:
         reservoir = (Reservoir(np.empty((0, len(FEATURE_NAMES))), np.empty((0, 0)),
                            {"kind": "plain_dqn_control", "biological_connectome": False}) if plain else
@@ -109,17 +123,20 @@ def train(bars, output, epochs=6, seed=7, graph=None, risk=None, plain=False, fu
         raise ValueError("Graph input feature count mismatch")
     if full_brain:
         normalized = scaler.transform(raw)
-        started = time.monotonic()
-        reservoir.reset()
-        encoded = np.empty((len(raw), reservoir.output_dim))
-        for i, x in enumerate(normalized):
-            encoded[i] = reservoir.step(x)
-            if (i % 20 == 0 or i == len(raw) - 1) and progress:
-                elapsed = time.monotonic() - started
-                progress({"stage": "brain_encoding", "completed": i + 1, "total": len(raw),
-                          "elapsed_seconds": elapsed,
-                          "remaining_seconds_estimate": elapsed / (i + 1) * (len(raw) - i - 1),
-                          "activity": {k: v for k, v in reservoir.latest.items() if k not in ("indices", "counts", "input_rates")}})
+        if fast_brain:
+            encoded = reservoir.encode_cached(normalized, bars.digest(), progress, encoding_cache)
+        else:
+            started = time.monotonic()
+            reservoir.reset()
+            encoded = np.empty((len(raw), reservoir.output_dim))
+            for i, x in enumerate(normalized):
+                encoded[i] = reservoir.step(x)
+                if (i % 20 == 0 or i == len(raw) - 1) and progress:
+                    elapsed = time.monotonic() - started
+                    progress({"stage": "brain_encoding", "completed": i + 1, "total": len(raw),
+                              "elapsed_seconds": elapsed,
+                              "remaining_seconds_estimate": elapsed / (i + 1) * (len(raw) - i - 1),
+                              "activity": {k: v for k, v in reservoir.latest.items() if k not in ("indices", "counts", "input_rates")}})
         np.savez_compressed(out / "brain_embeddings.npz", encoded=encoded, scaler_mean=scaler.mean,
                             scaler_scale=scaler.scale, dataset_sha256=np.array(bars.digest()))
     else:
@@ -230,7 +247,7 @@ def evaluate_file(bars, checkpoint, forward=False):
 
 
 def walk_forward(bars, output, folds=3, epochs=6, seed=7, graph=None, plain=False, full_brain=False,
-                 initial=10_000, progress=None):
+                 initial=10_000, progress=None, fast_brain=False, encoding_cache=None):
     if not 2 <= folds <= 5:
         raise ValueError("Use 2..5 chronological folds")
     ends = [int(len(bars.time) * 0.8 ** k) for k in reversed(range(folds))]
@@ -245,7 +262,7 @@ def walk_forward(bars, output, folds=3, epochs=6, seed=7, graph=None, plain=Fals
                           spec=bars.spec, source=bars.source, synthetic=bars.synthetic, time_basis=bars.time_basis,
                           rollover=bars.rollover, assumptions=bars.assumptions)
         result = train(part, root / f"fold-{i + 1}", epochs, seed, graph, plain=plain, full_brain=full_brain,
-                       initial=initial, progress=progress)
+                       initial=initial, progress=progress, fast_brain=fast_brain, encoding_cache=encoding_cache)
         reports.append({"fold": i + 1, "test_start": result["model"]["test_start"],
                         "test_end": end, "holdout": result["holdout"], "baselines": result["baselines"]})
     summary = {"folds": reports, "synthetic": bars.synthetic, "profitability_established": False,

@@ -247,7 +247,7 @@ class Workstation:
 
     def start_training(self, dataset, epochs=10, encoder="whole-brain"):
         data = self.resolve(dataset, "data")
-        if encoder not in ("whole-brain", "plain") or not 1 <= epochs <= 200:
+        if encoder not in ("whole-brain", "fast-brain", "plain") or not 1 <= epochs <= 200:
             raise ValueError("Invalid training configuration")
         bars = load_bars(data)
         if bars.synthetic:
@@ -262,7 +262,7 @@ class Workstation:
             self.brain = None
             gc.collect()
             result = train(bars, output, epochs=epochs, full_brain=encoder == "whole-brain",
-                           plain=encoder == "plain", progress=update)
+                           plain=encoder == "plain", fast_brain=encoder == "fast-brain", progress=update)
             return {"model": str((output / "model.npz").relative_to(self.root)), "holdout": result["holdout"]}
         return self.launch_job("train", work)
 

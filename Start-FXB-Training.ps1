@@ -1,7 +1,8 @@
 param(
     [string]$ProjectRoot = $PSScriptRoot,
     [Parameter(Mandatory = $true)][string]$DataDirectory,
-    [ValidateRange(1, 200)][int]$Epochs = 10
+    [ValidateRange(1, 200)][int]$Epochs = 10,
+    [switch]$FastBrain
 )
 $ErrorActionPreference = 'Stop'
 if ([string]::IsNullOrWhiteSpace($ProjectRoot)) { $ProjectRoot = (Get-Location).Path }
@@ -42,6 +43,11 @@ $fxbRuns = Join-Path $fxbRoot ('runs\' + $fxbRunId)
 $fxbReports = Join-Path $fxbRuns 'reports'
 New-Item -ItemType Directory -Path $fxbReports -Force | Out-Null
 $fxbBalanceText = $fxbInitial.ToString([Globalization.CultureInfo]::InvariantCulture)
+$fxbEncoderOption = '--full-brain'
+if ($FastBrain) {
+    $fxbEncoderOption = '--fast-brain'
+    Write-Host 'Compiled full-brain mode. Neural encoding checkpoints resume automatically.'
+}
 Write-Host 'Training the complete connectome on historical data. This command sends no orders.'
 Write-Host ('Initial balance scenario: ' + $fxbBalanceText)
 Write-Host ('Clock evidence: ' + $fxbProfile.clock_evidence.status)
@@ -51,7 +57,7 @@ try {
         $fxbName = [IO.Path]::GetFileNameWithoutExtension([string]$fxbItem.file)
         $fxbOutput = Join-Path $fxbRuns $fxbName
         Write-Host ('Training: ' + $fxbItem.symbol)
-        & $fxbPython -u -m fxb train --data (Join-Path $fxbData $fxbItem.file) --out $fxbOutput --full-brain --epochs $Epochs --initial-balance $fxbBalanceText
+        & $fxbPython -u -m fxb train --data (Join-Path $fxbData $fxbItem.file) --out $fxbOutput $fxbEncoderOption --epochs $Epochs --initial-balance $fxbBalanceText
         if ($LASTEXITCODE -ne 0) { throw ('Training stopped for ' + $fxbItem.symbol + '. Existing output was preserved at ' + $fxbOutput) }
         Copy-Item -LiteralPath (Join-Path $fxbOutput 'report.json') -Destination (Join-Path $fxbReports ($fxbName + '-report.json'))
         Copy-Item -LiteralPath (Join-Path $fxbOutput 'holdout_trades.json') -Destination (Join-Path $fxbReports ($fxbName + '-holdout-trades.json'))

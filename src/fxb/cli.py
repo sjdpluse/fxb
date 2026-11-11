@@ -38,10 +38,12 @@ def parser():
         c.add_argument("--seed", type=int, default=7)
         c.add_argument("--initial-balance", type=float, default=10_000,
                        help="Starting account-currency balance for each independent partition")
+        c.add_argument("--encoding-cache", help="Optional directory for resumable compiled-brain encoding")
         g = c.add_mutually_exclusive_group()
         g.add_argument("--graph")
         g.add_argument("--plain", action="store_true", help="Train the same DQN without recurrence as a control")
         g.add_argument("--full-brain", action="store_true", help="Use all 138,639 neurons of the published Brian2 model")
+        g.add_argument("--fast-brain", action="store_true", help="Compiled full Shiu LIF graph; resumes cached neural encoding")
         if name == "walk-forward":
             c.add_argument("--folds", type=int, default=3)
     c = commands.add_parser("evaluate")
@@ -115,7 +117,8 @@ def run(args):
             if event["stage"] == "brain_encoding":
                 print(json.dumps({k: v for k, v in event.items() if k != "activity"}), flush=True)
         kw = dict(epochs=args.epochs, seed=args.seed, graph=args.graph, plain=args.plain,
-                  full_brain=args.full_brain, initial=args.initial_balance, progress=progress)
+                  full_brain=args.full_brain, initial=args.initial_balance, progress=progress,
+                  fast_brain=args.fast_brain, encoding_cache=args.encoding_cache)
         if args.command == "walk-forward":
             r = walk_forward(load_bars(args.data), args.out, folds=args.folds, **kw)
             return r
