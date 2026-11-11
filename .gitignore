@@ -8,6 +8,8 @@ __pycache__/
 data/
 runs/
 state/
+diagnostics/
+backups/
 *.sqlite*
 *.npz
 *.lock

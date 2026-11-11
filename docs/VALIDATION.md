@@ -1,5 +1,13 @@
 # Validation record
 
+## Raw market-data export — 2026-11-11 (Asia/Kabul)
+
+- The user reported three successful Windows MT5 clock checks for `XAUUSD.m` and `US100.std`, with zero orders sent, and then both native-machine full-connectome integration tests passing in **55.228 seconds**. The reported Pyparsing deprecation warning did not fail those tests. These are user-provided runtime results, distinct from hosted CI.
+- Added a standalone exporter compatible with the installed 0.2.2 package. It captures closed M5 bars, contract fields and a labelled margin snapshot, validates the configured account/server and current quote/bar times, and emits a unique ZIP with per-file SHA-256 values.
+- Historical timestamps are preserved raw, even outside the current clock policy's validity interval. The archive cannot be mistaken for the existing UTC training CSV format. Unknown commission, slippage and overnight costs stay null; no historical clock rule is inferred from today's offset.
+- Local suite: **85 tests run, 81 passed, 4 skipped, no failures**. New coverage verifies exact raw values/hashes, private-config exclusion, account mismatch, stale quotes/bars, malformed history, non-overwriting output and execution from a temporary path containing spaces. Compilation and whitespace checks passed. Hosted Windows/Linux results are attached to the commit's Actions run.
+- The exporter sends no orders and does not alter the account configuration. It does not verify a broker's historical DST policy or establish a trained strategy's profitability. Before operational training/deployment, the simulator's existing flat overnight charge at a Kabul-date boundary must also be distinguished from the broker's actual rollover schedule and tariff; those are not interchangeable.
+
 ## v0.2.2 — native MT5 record compatibility — 2026-11-11 (Asia/Kabul)
 
 - Reproduced the reported `vars() argument must have __dict__ attribute` failure for tick, position and deal records before changing the adapter. The previous portable tests used Python namespaces and did not cover the extension record protocol.
