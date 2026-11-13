@@ -146,9 +146,13 @@ def scalp_cycle(bridge, model_path, memory, expected_login, calendar=None, execu
     # Risk/time exits run on every poll, before history, model warmup or news checks.
     if p and (stopped or guard.daily_halt or guard.total_halt or p.sl <= 0 or p.tp <= 0
               or now - p.time >= risk.max_hold_bars * 60):
+        exit_key = f"{account_key}:{p.ticket}:scalp-risk-close:{int(now//60)}"
         result = bridge.send_order(bridge.close_request(p),
-            f"{account_key}:{p.ticket}:scalp-risk-close:{int(now//60)}", memory, expected_login, **send_options)
-        return {"action": "CLOSE", "reason": "M1_time_risk_or_stop", **result}
+            exit_key, memory, expected_login, **send_options)
+        decision = {"action": "CLOSE", "reason": "M1_time_risk_or_stop", **result}
+        memory.record(scope, spec.symbol, "scalp_exit", now, max(now, time.time()), decision,
+                      hashlib.sha256(f"{exit_key}:{execute}".encode()).hexdigest())
+        return decision
     if stopped:
         return {"action": "WAIT", "reason": "stop_file"}
     source_clock = (meta.get("time_basis") or {}).get("broker_clock")
@@ -165,7 +169,8 @@ def scalp_cycle(bridge, model_path, memory, expected_login, calendar=None, execu
     settle_attempts(memory, scope, spec.symbol, deals, positions, now, cfg)
     learned = learning_state(memory, scope)
     public_learning = {k: v for k, v in learned.items() if k != "weights"}
-    bridge.scalp_status = {"symbol": spec.symbol, "timeframe": "M1", "context_bars": 500,
+    bridge.scalp_status = (getattr(bridge, "scalp_status", None) or {}) | {
+                           "symbol": spec.symbol, "timeframe": "M1", "context_bars": 500,
                            "learning": public_learning, "risk": meta["risk"], "execution": execute}
     bars = bridge.bars(spec, cfg.context_bars)
     if bars.synthetic or len(bars.time) != cfg.context_bars:
@@ -178,9 +183,11 @@ def scalp_cycle(bridge, model_path, memory, expected_login, calendar=None, execu
     if memory.get_state(decision_key):
         return {"action": "WAIT", "reason": "already_processed_bar"}
     raw, atr, signals, structure = analyze(bars, cfg)
-    if brain.last_time is not None and brain.last_time < bars.time[0]:
-        brain.reset()
-    encoded = brain.observe(raw, bars.time)
+    encoded = None
+    if not p:
+        if brain.last_time is not None and brain.last_time < bars.time[0]:
+            brain.reset()
+        encoded = brain.observe(raw, bars.time)
     decision = {"action": "WAIT", "reason": "no_confirmed_setup", "bar_closed_at": closed_at,
                 "strategy": VERSION, "structure": structure[-1], "learning": public_learning,
                 "features": dict(zip(FEATURES, raw[-1].tolist()))}
@@ -191,7 +198,11 @@ def scalp_cycle(bridge, model_path, memory, expected_login, calendar=None, execu
         if structure[-1]["structure_break"] == -side:
             decision.update(action="CLOSE", reason="opposite_M1_structure_break")
             memory.put_state(decision_key, decision)
-            return decision | bridge.send_order(bridge.close_request(p), key, memory, expected_login, **send_options)
+            decision.update(bridge.send_order(bridge.close_request(p), key, memory, expected_login, **send_options))
+            memory.record(scope, spec.symbol, "scalp_exit", closed_at, max(closed_at, time.time()), decision,
+                          hashlib.sha256(decision_key.encode()).hexdigest())
+            bridge.scalp_status.update(structure=structure[-1], last_decision=decision)
+            return decision
         decision["reason"] = "managing_broker_SL_TP"
     elif signal:
         vector = readout_context(encoded, signal)

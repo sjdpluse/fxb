@@ -210,6 +210,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertLess(r["request"]["sl"],r["request"]["price"])
         self.assertEqual(self.run_cycle()["reason"],"already_processed_bar")
         self.assertEqual(self.api.calls,1)
+        self.assertEqual(self.bridge.scalp_status["structure"],self.structure)
+        self.assertEqual(self.bridge.scalp_status["last_decision"]["status"],"sent")
 
     def test_dry_run_cannot_create_learning_samples_or_broker_orders(self):
         self.assertEqual(self.run_cycle(execute=False)["status"],"dry_run")
@@ -242,6 +244,16 @@ class RuntimeTests(unittest.TestCase):
             r=self.run_cycle()
         self.assertEqual(r["action"],"CLOSE")
         self.assertEqual(self.api.calls,1)
+
+    def test_opposite_structure_exit_does_not_wait_for_neural_initialization(self):
+        self.api.open_positions=(NS(ticket=1,magic=MAGIC,symbol="XAUUSD.m",time=self.now-100,
+            type=0,volume=.01,sl=99,tp=102),)
+        self.brain.observe=lambda x,t: self.fail("Position management must not initialize the graph")
+        self.structure["structure_break"]=-1
+        result=self.run_cycle()
+        self.assertEqual(result["action"],"CLOSE")
+        self.assertEqual(result["status"],"sent")
+        self.assertEqual(self.m.recent_events()[0]["kind"],"scalp_exit")
 
     def test_live_still_requires_matching_activation(self):
         self.api.account_value.trade_mode=2
