@@ -220,21 +220,22 @@ class MT5:
         positions = tuple(self.timed_record(p, ("time", "time_msc", "time_update", "time_update_msc")) for p in positions)
         return positions, orders
 
-    def spec(self, symbol, commission, slippage, overnight):
+    def spec(self, symbol, commission, slippage, overnight, timeframe_seconds=300):
         info, account = self.symbol(symbol), self.account()
         tick = self.tick(symbol)
         ref = max(info.volume_min, min(1.0, info.volume_max))
         margin = self.api.order_calc_margin(self.api.ORDER_TYPE_BUY, symbol, ref, tick.ask)
         if margin is None or not math.isfinite(margin) or margin <= 0:
             raise Blocked("Cannot obtain margin in the account currency")
-        return Spec(symbol, account.currency, 300, info.point, info.trade_tick_size,
+        return Spec(symbol, account.currency, timeframe_seconds, info.point, info.trade_tick_size,
                     info.trade_tick_value_loss, info.volume_min, info.volume_max, info.volume_step,
                     margin / ref, commission, slippage, overnight, info.trade_stops_level * info.point)
 
     def bars(self, spec, count=512):
-        raw = self.api.copy_rates_from_pos(spec.symbol, self.api.TIMEFRAME_M5, 1, count)
+        timeframe = self.api.TIMEFRAME_M1 if spec.timeframe_seconds == 60 else self.api.TIMEFRAME_M5
+        raw = self.api.copy_rates_from_pos(spec.symbol, timeframe, 1, count)
         if raw is None or len(raw) < min(count, 512):
-            raise Blocked("Insufficient closed M5 history; load more bars in MT5")
+            raise Blocked(f"Insufficient closed M{spec.timeframe_seconds // 60} history; load more bars in MT5")
         times = np.asarray([self.utc(t) for t in raw["time"]], dtype=float)
         return Bars(times, raw["open"], raw["high"], raw["low"], raw["close"],
                     raw["tick_volume"].astype(float), raw["spread"] * spec.point, spec,
@@ -250,7 +251,7 @@ class MT5:
             return self.api.ORDER_FILLING_RETURN
         raise Blocked("No supported market-order filling policy")
 
-    def request(self, symbol, side, atr, spec, risk, account, now=None):
+    def request(self, symbol, side, atr, spec, risk, account, now=None, structural_stop=None):
         info, tick = self.symbol(symbol), self.tick(symbol, now)
         if info.trade_mode != self.api.SYMBOL_TRADE_MODE_FULL:
             raise Blocked("Symbol does not permit full trading")
@@ -267,7 +268,17 @@ class MT5:
         entry = tick.ask if side > 0 else tick.bid
         # Include spread when respecting the broker's stop distance from its closing quote.
         active_spec = Spec(**(asdict(spec) | {"stops_level": info.trade_stops_level * info.point + spread}))
-        stop, target = levels(side, entry, atr, active_spec, risk)
+        if structural_stop is None:
+            stop, target = levels(side, entry, atr, active_spec, risk)
+        else:
+            from .risk import round_price
+            if not math.isfinite(structural_stop) or structural_stop <= 0:
+                raise Blocked("Invalid structural stop")
+            stop = round_price(structural_stop, spec.tick_size, up=side < 0)
+            distance = side * (entry - stop)
+            if distance <= active_spec.stops_level or distance > 2.5 * atr or spread > .25 * distance:
+                raise Blocked("Structural stop conflicts with broker distance, spread or M1 volatility")
+            target = round_price(entry + side * distance * risk.reward_risk, spec.tick_size, up=side > 0)
         order_type = self.api.ORDER_TYPE_BUY if side > 0 else self.api.ORDER_TYPE_SELL
         ref = max(info.volume_min, min(1.0, info.volume_max))
         slip = math.ceil(spec.slippage_points) * spec.point
@@ -294,7 +305,10 @@ class MT5:
                 "type_time": self.api.ORDER_TIME_GTC, "type_filling": self.filling(info)}
 
     def send_order(self, request, key, memory, expected_login, execute=False, mode="demo",
-                   expected_server=None, authorization=None, model_hash=None, risk_config=None):
+                   expected_server=None, authorization=None, model_hash=None, risk_config=None,
+                   entry_period_seconds=300, entry_deadline=None):
+        if entry_period_seconds not in (60, 300):
+            raise Blocked("Unsupported entry interval")
         account = self.account(expected_login, execution_mode=mode, expected_server=expected_server)
         if mode == "live" and execute:
             if authorization is None:
@@ -317,9 +331,12 @@ class MT5:
             entry, stop, target = request["price"], request.get("sl", 0), request.get("tp", 0)
             if not (0 < stop < entry < target if buy else 0 < target < entry < stop):
                 raise Blocked("Opening orders require valid broker-side SL and TP")
-            slot = f"entry-slot:{expected_login}:{int(time.time() // 300)}"
+            slot = (f"entry-slot:{expected_login}:{int(time.time() // 300)}" if entry_period_seconds == 300 else
+                    f"entry-slot-m1:{expected_login}:{int(time.time() // 60)}")
             if execute and memory.get_state(slot) not in (None, key):
-                raise Blocked("Another policy already reserved this account's entry for the current M5 bar")
+                raise Blocked("Another policy already reserved this account's entry for the current bar")
+            if entry_deadline is not None and time.time() > entry_deadline:
+                raise Blocked("Scalp entry window expired")
         if not execute:
             return {"status": "dry_run", "request": request}
         if memory.unresolved():
@@ -335,6 +352,8 @@ class MT5:
         # Recheck the account and quote immediately before the only submission call.
         try:
             self.account(expected_login, execution_mode=mode, expected_server=expected_server)
+            if "position" not in request and entry_deadline is not None and time.time() > entry_deadline:
+                raise Blocked("Scalp entry window expired before submission")
             if mode == "live":
                 authorization.validate(account.login, account.server, model_hash, risk_config,
                                        reducing_risk="position" in request)

@@ -57,7 +57,7 @@ class Bars:
         if np.any(np.diff(self.time) <= 0):
             raise ValueError("Duplicate or unordered timestamps; input is never silently sorted")
         if np.any(self.time % self.spec.timeframe_seconds != 0):
-            raise ValueError("Bar opening times must be aligned to M5 UTC boundaries")
+            raise ValueError("Bar opening times must align to the declared UTC timeframe")
         if (np.any(self.low <= 0) or np.any(self.high < np.maximum(self.open, self.close))
                 or np.any(self.low > np.minimum(self.open, self.close))
                 or np.any(self.spread < 0) or np.any(self.volume < 0)):
@@ -157,7 +157,7 @@ def features(bars):
         ret = [np.log(c[i] / c[max(0, i - k)]) for k in (1, 3, 12, 48)]
         trend = [(c[i] - c[max(0, i - k + 1):i + 1].mean()) / a for k in (12, 48)]
         old = slice(max(0, i - 20), max(1, i))
-        dt = datetime.fromtimestamp(float(bars.time[i] + 300), UTC)
+        dt = datetime.fromtimestamp(float(bars.time[i] + bars.spec.timeframe_seconds), UTC)
         hour = (dt.hour + dt.minute / 60) * 2 * np.pi / 24
         week = dt.weekday() * 2 * np.pi / 7
         out[i] = ret + trend + [a / c[i], returns[max(0, i - 23):i + 1].std(),

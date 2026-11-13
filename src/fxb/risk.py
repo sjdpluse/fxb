@@ -58,8 +58,8 @@ class Spec:
         for name in ("point", "tick_size", "tick_value", "lot_min", "lot_max", "lot_step", "margin_per_lot"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"Contract field must be positive: {name}")
-        if self.lot_max < self.lot_min or self.timeframe_seconds != 300:
-            raise ValueError("This release requires M5 bid bars and valid lot bounds")
+        if self.lot_max < self.lot_min or self.timeframe_seconds not in (60, 300):
+            raise ValueError("Only M1/M5 bid bars and valid lot bounds are supported")
 
     def pnl(self, side, entry, exit_price, lots):
         return side * (exit_price - entry) / self.tick_size * self.tick_value * lots

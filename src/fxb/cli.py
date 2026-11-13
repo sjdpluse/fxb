@@ -25,6 +25,12 @@ def parser():
     c = commands.add_parser("clock-check", help="Read-only UTC/MT5 timestamp check using the saved workstation account")
     c.add_argument("--root", default=".")
     c.add_argument("--symbols", nargs="+", required=True)
+    c = commands.add_parser("scalp-prepare", help="Prepare the gold M1 online profile from 500 recent closed bars; sends no orders")
+    c.add_argument("--root", default=".")
+    c.add_argument("--symbol", default="XAUUSD.m")
+    c.add_argument("--commission", type=float, required=True)
+    c.add_argument("--slippage-points", type=float, required=True)
+    c.add_argument("--overnight-cost", type=float, required=True)
     c = commands.add_parser("synth", help="Generate clearly labelled synthetic test bars")
     c.add_argument("--out", required=True)
     c.add_argument("--bars", type=int, default=2400)
@@ -90,6 +96,20 @@ def parser():
 
 
 def run(args):
+    if args.command == "scalp-prepare":
+        from .workstation import Workstation
+        from .scalper_runtime import create_profile
+        controller = Workstation(args.root)
+        try:
+            with WorkerLock(controller.db_path):
+                controller.connect()
+                output = controller.root / "runs" / f"gold-M1-scalper-{time.time_ns()}"
+                result = create_profile(controller.bridge, args.symbol, output, args.commission,
+                                        args.slippage_points, args.overnight_cost)
+                result["model"] = str(Path(result["model"]).relative_to(controller.root))
+                return result
+        finally:
+            if controller.bridge: controller.bridge.close()
     if args.command == "clock-check":
         config = json.loads((Path(args.root) / "state/workstation.json").read_text(encoding="utf-8-sig"))
         if not config.get("login") or not config.get("server"):

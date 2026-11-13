@@ -1,5 +1,16 @@
 # Validation record
 
+## v0.3.0 — gold M1 context, structure and online readout — 2026-11-13 (Asia/Kabul)
+
+- Added a separate gold scalper deployment profile that reads 500 actual closed M1 bars. The previous M5 DQN path is preserved and explicitly rejects M1 training through its M5 simulator.
+- Added two fully specified causal setups: sweep/structure-shift/FVG first retest, and structure-break/FVG first retest. Pivot confirmation, completed M5 context, missing-bar rejection and no same-candle FVG entry are covered by tests; prefix comparison verifies that future bars do not repaint earlier observations or signals.
+- The complete compiled graph consumes 19 M1 structure features. An initially untrained bounded readout learns only from fully closed, matched broker positions, including entry/exit commission, swap and fees. Samples, state and reward journal updates are transactional and idempotent. Partial exits, manual intervention and cross-account/profile learning are excluded.
+- Actual transport code now supports M1 as well as M5, structural stops, independent per-minute entry reservations, and an entry deadline rechecked before submission. Mocked broker tests cover order sizing, valid real-mode activation, duplicate/ambiguous submissions, restart, late neural initialization, spread/news/exposure vetoes, settled costs, loss cooldown and forced exits before neural/history work.
+- Added profile preparation and M1 structure/learning status to the existing workstation, with exact-account live activation and all existing safeguards. Starting a worker releases inactive whole-brain instances to avoid retaining multiple full graphs.
+- Local standard suite: **125 tests run, 116 passed, 9 skipped** (6 opt-in whole-brain tests, 2 Windows SDK checks, 1 browser test). The M1 suite was also run with the published graph enabled: **25 tests passed in 10.377 seconds**, including full 138,639-neuron adapter execution, repeated-bar reuse and profile round-trip.
+- Python compilation, JavaScript syntax, dependency consistency and whitespace checks passed. Local Chromium launch was blocked by the environment's Unix-socket restriction; a separate hosted Chromium job was added. Hosted CI also runs original/compiled/M1 graph integration on both Windows and Linux. The exact commit's Actions result is the evidence for hosted outcomes.
+- No live terminal order was sent during development. No new M1 broker dataset, profitable holdout, measured execution quality or live-account profitability is claimed. Five hundred bars are context, not a sufficient profitability study. Detailed implementation boundaries and operator instructions: [Gold M1 scalper](GOLD_SCALPER.md).
+
 ## v0.2.4 — compiled full-brain execution and encoding resume — 2026-11-11 (Asia/Kabul)
 
 - Added an opt-in Numba implementation of the pinned Shiu LIF equations with the entire 138,639-neuron / 15,091,983-edge graph, unchanged 0.1 ms timestep, 20 ms market window, float64 state, per-observation NumPy Poisson stream and input/readout mapping. Brian2 NumPy remains the default reference backend. Compiled checkpoints explicitly record and reload their backend.

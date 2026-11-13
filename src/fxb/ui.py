@@ -142,6 +142,9 @@ def create_app(root=".", preview=False, token=None):
                                          float(payload["slippage"]), float(payload["overnight"]))
             if action == "training/start":
                 return controller.start_training(str(payload["dataset"]), int(payload.get("epochs", 10)), str(payload.get("encoder", "whole-brain")))
+            if action == "scalper/prepare":
+                return controller.prepare_scalper(str(payload["symbol"]), float(payload["commission"]),
+                                                  float(payload["slippage"]), float(payload["overnight"]))
             if action == "execution/start":
                 models = payload.get("models", [])
                 if not isinstance(models, list) or any(not isinstance(p, str) for p in models):

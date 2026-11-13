@@ -84,6 +84,7 @@ class Workstation:
                     "symbol": meta["spec"]["symbol"], "synthetic": meta["synthetic"],
                     "encoder": meta.get("encoder_type", meta.get("topology", {}).get("kind", "control")),
                     "run_id": meta["run_id"], "risk": meta["risk"], "source": meta["data_source"],
+                    "strategy": meta.get("strategy"), "timeframe_seconds": meta["spec"]["timeframe_seconds"],
                     "holdout": report.get("holdout"), "selected_epoch": meta.get("selected_epoch"),
                     "sha256": sha256(path)})
             except (ValueError, KeyError, OSError):
@@ -97,7 +98,7 @@ class Workstation:
             if csv_path.exists():
                 meta = json.loads(path.read_text(encoding="utf-8"))
                 result.append({"path": str(csv_path.relative_to(self.root)), "symbol": meta["spec"]["symbol"],
-                               "synthetic": meta["synthetic"], "source": meta["source"]})
+                               "synthetic": meta["synthetic"], "source": meta["source"], "spec": meta["spec"]})
         return result
 
     def status(self):
@@ -110,14 +111,18 @@ class Workstation:
             for policy in getattr(self.bridge, "_policies", {}).values():
                 if hasattr(policy[1], "latest") and policy[1].net is not None:
                     activity = policy[1].latest | {"input_source": "closed_market_bars"}
+            for policy in getattr(self.bridge, "_scalp_policies", {}).values():
+                if policy[0].net is not None:
+                    activity = policy[0].latest | {"input_source": "closed_market_bars"}
         memory = Memory(self.db_path)
         try:
             journal = memory.stats()
         finally:
             memory.close()
         try:
-            NewsGate(str(self.root / self.config["calendar"])).check(time.time(), 3600)
-            news = {"ready": True, "reason": "Calendar covers the next hour"}
+            horizon = 300 if getattr(self.bridge, "_scalp_policies", {}) else 3600
+            NewsGate(str(self.root / self.config["calendar"])).check(time.time(), horizon)
+            news = {"ready": True, "reason": f"Calendar covers the next {horizon//60} minutes"}
         except (Blocked, OSError, ValueError) as e:
             news = {"ready": False, "reason": str(e)}
         return {"version": __version__, "preview": self.preview, "platform": os.name, "news": news,
@@ -126,6 +131,7 @@ class Workstation:
                 "models": self.models(), "datasets": self.datasets(), "active_models": self.active_models,
                 "brain": {"manifest": manifest, "activity": activity}, "job": dict(self.job),
                 "journal": journal, "decisions": self.last_decisions[-20:], "events": self.events[-25:],
+                "scalper": getattr(self.bridge, "scalp_status", None),
                 "error": self.last_error, "live_activation": self.authorization.public_status() if self.authorization else None,
                 "config": self.config, "connected": self.bridge is not None}
 
@@ -133,7 +139,7 @@ class Workstation:
         with self.lock:
             if self.job["status"] == "running":
                 raise ValueError("Another background operation is still running")
-            if self.worker and self.worker.is_alive() and kind in ("brain_install", "brain_stimulate", "train"):
+            if self.worker and self.worker.is_alive() and kind in ("brain_install", "brain_stimulate", "train", "scalp_prepare"):
                 raise ValueError("Stop the trading worker before changing or stimulating its neural engine")
             self.cancel_job.clear()
             self.job = {"status": "running", "kind": kind, "started_at": time.time(), "progress": {}}
@@ -266,6 +272,21 @@ class Workstation:
             return {"model": str((output / "model.npz").relative_to(self.root)), "holdout": result["holdout"]}
         return self.launch_job("train", work)
 
+    def prepare_scalper(self, symbol, commission, slippage, overnight):
+        from .scalper_runtime import create_profile
+        if self.preview or self.bridge is None:
+            raise Blocked("Connect the local MT5 terminal before preparing the M1 scalper")
+        if self.worker and self.worker.is_alive():
+            raise ValueError("Stop execution before preparing another trading profile")
+        safe_symbol = re.sub(r"[^a-zA-Z0-9_.-]", "_", symbol)
+        output = self.root / "runs" / f"{safe_symbol}-M1-scalper-{time.time_ns()}"
+        def work(update):
+            update({"stage": "reading_M1", "message": "Reading 500 closed gold bars; no historical DQN training"})
+            result = create_profile(self.bridge, symbol, output, commission, slippage, overnight)
+            result["model"] = str(Path(result["model"]).relative_to(self.root))
+            return result
+        return self.launch_job("scalp_prepare", work)
+
     def start(self, model_paths, mode="dry-run", acknowledged_login=None, hours=8):
         if self.preview:
             raise Blocked("The preview cannot activate a trading account")
@@ -279,6 +300,8 @@ class Workstation:
             raise ValueError("Choose a mode and one or two deployment models")
         paths = [self.resolve(p, "runs") for p in model_paths]
         metas = [metadata(p) for p in paths]
+        if any(m.get("strategy") for m in metas) and len(metas) != 1:
+            raise ValueError("Run the gold M1 scalper alone on this account worker")
         if len({m["spec"]["symbol"] for m in metas}) != len(metas):
             raise ValueError("Choose only one model per symbol")
         if any(m["risk"] != metas[0]["risk"] for m in metas):
@@ -297,6 +320,10 @@ class Workstation:
         self.last_error = None
         self.worker_stop.clear()
         self.brain = None
+        # Switching strategies must not retain several full 15M-edge graphs.
+        self.bridge._policies = {}
+        self.bridge._scalp_policies = {}
+        self.bridge.scalp_status = None
         gc.collect()
         (self.root / "STOP").unlink(missing_ok=True)
         def run():
@@ -308,7 +335,9 @@ class Workstation:
                     while not self.worker_stop.is_set():
                         for path in paths:
                             try:
-                                result = cycle(self.bridge, path, memory, self.config["login"],
+                                from .scalper_runtime import scalp_cycle
+                                runner = scalp_cycle if metas[paths.index(path)].get("strategy") else cycle
+                                result = runner(self.bridge, path, memory, self.config["login"],
                                     calendar=str(self.root / self.config["calendar"]), execute=mode != "dry-run",
                                     kill_file=str(self.root / "STOP"), mode=broker_mode,
                                     expected_server=self.config["server"], authorization=self.authorization,

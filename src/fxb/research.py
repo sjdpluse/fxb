@@ -91,6 +91,8 @@ def train(bars, output, epochs=6, seed=7, graph=None, risk=None, plain=False, fu
         raise ValueError("epochs must be 1..200")
     risk = risk or Risk()
     bars.validate()
+    if bars.spec.timeframe_seconds != 300:
+        raise ValueError("Historical DQN training remains M5; use scalp-prepare for the M1 online scalper")
     if not np.isfinite(initial) or initial <= 0:
         raise ValueError("Initial balance must be positive")
     n = len(bars.time)

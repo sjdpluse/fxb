@@ -44,7 +44,7 @@ class WorkstationTests(unittest.TestCase):
     def test_preview_has_no_account_or_trading_authority(self):
         with TestClient(create_app(self.root, preview=True, token=self.token)) as client:
             self.assertEqual(client.get("/api/status").status_code, 200)
-            for endpoint in ("execution/start", "account/configure", "data/export", "memory/sync", "calendar/save", "training/start"):
+            for endpoint in ("execution/start", "account/configure", "data/export", "memory/sync", "calendar/save", "training/start", "scalper/prepare"):
                 with self.subTest(endpoint=endpoint):
                     self.assertEqual(client.post("/api/" + endpoint, json={}).status_code, 403)
 
@@ -61,6 +61,29 @@ class WorkstationTests(unittest.TestCase):
             json={"dataset": "data/fixture.csv", "epochs": 1, "encoder": "whole-brain"})
         self.assertEqual(response.status_code, 409)
         self.assertIn("requires exported market data", response.json()["error"])
+
+    def test_scalper_route_requires_connection_and_has_visible_controls(self):
+        shell=self.client.get("/").text
+        self.assertIn('id="scalp-form"',shell)
+        self.assertIn('id="scalp-status"',shell)
+        result=self.client.post("/api/scalper/prepare",headers=self.headers,
+            json={"symbol":"XAUUSD.m","commission":0,"slippage":26,"overnight":85})
+        self.assertEqual(result.status_code,409)
+        self.assertIn("Connect",result.json()["error"])
+
+    def test_scalper_is_discoverable_without_a_historical_training_report(self):
+        import numpy as np
+        from dataclasses import asdict
+        from fxb.scalping import scalp_risk, VERSION
+        folder=self.root/"runs"/"gold-M1-test";folder.mkdir(parents=True)
+        spec=asdict(synthetic_bars(800).spec)|{"timeframe_seconds":60}
+        meta={"spec":spec,"synthetic":False,"encoder_type":"scalp-full-brain","strategy":VERSION,
+              "run_id":"test","risk":asdict(scalp_risk()),"data_source":"software test"}
+        np.savez_compressed(folder/"model.npz",meta=np.array(json.dumps(meta)))
+        models=self.app.state.controller.models()
+        self.assertEqual(len(models),1)
+        self.assertEqual(models[0]["timeframe_seconds"],60)
+        self.assertIsNone(models[0]["holdout"])
 
     def test_clock_configuration_rejects_unbounded_offset_without_saving(self):
         c = self.app.state.controller
