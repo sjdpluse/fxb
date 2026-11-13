@@ -85,13 +85,21 @@ class WorkstationTests(unittest.TestCase):
         self.assertEqual(models[0]["timeframe_seconds"],60)
         self.assertIsNone(models[0]["holdout"])
 
-    def test_clock_configuration_rejects_unbounded_offset_without_saving(self):
+    def test_clock_configuration_rejects_half_supplied_bounds_without_saving(self):
         c = self.app.state.controller
         result = self.client.post("/api/account/configure", headers=self.headers,
-            json={"login": 123, "broker_clock": {"zone": "+02:00"}})
+            json={"login": 123, "broker_clock": {"zone": "+02:00", "valid_until": "2026-11-12T00:00:00Z"}})
         self.assertEqual(result.status_code, 409)
         self.assertIsNone(c.config["login"])
         self.assertEqual(c.config["broker_clock"]["zone"], "UTC")
+
+    def test_clock_without_expiry_survives_workstation_restart(self):
+        result = self.client.post("/api/account/configure", headers=self.headers,
+            json={"login": 123, "broker_clock": {"zone": "+02:00"}})
+        self.assertEqual(result.status_code, 200)
+        restarted = Workstation(self.root)
+        self.assertEqual(restarted.config["broker_clock"],
+                         {"zone": "+02:00", "valid_from": None, "valid_until": None})
 
     def test_legacy_dataset_is_rejected_before_expensive_training_after_clock_change(self):
         c = self.app.state.controller

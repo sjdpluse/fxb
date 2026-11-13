@@ -59,7 +59,7 @@ class Workstation:
                        "broker_clock": BrokerClock().config()}
         path = self.state_dir / "workstation.json"
         if path.exists():
-            self.config.update(json.loads(path.read_text(encoding="utf-8")))
+            self.config.update(json.loads(path.read_text(encoding="utf-8-sig")))
 
     def note(self, message, level="info", **extra):
         with self.lock:

@@ -1,5 +1,14 @@
 # Validation record
 
+## v0.3.1 — optional broker clock expiry — 2026-11-13 (Asia/Kabul)
+
+- Fixed offsets now accept empty validity dates for operation without calendar expiry. Explicit bounded policies remain enforced. Removing bounds preserves compatibility with profiles using the same fixed offset; it does not infer a seasonal rule or establish the offset of older historical data.
+- Added `clock-set`, which backs up the original workstation configuration and atomically replaces only the clock policy, preserving account and other settings. It refuses an active worker lock and does not initialize MT5 or send orders. UTF-8 BOM settings from PowerShell are accepted by both the command and workstation.
+- The clock report exposes normalized timestamps and quote ages even for stale quotes, with `waiting_for_quote` status. The 10-second stale limit and 2-second future limit remain unchanged. Existing worker retries recover when fresh data resumes.
+- Regression coverage replays the supplied November 13 tick (`1794594566753`) at the three supplied Windows times: ages 29.726011, 32.135986 and 36.850197 seconds under +02:00. All remain blocked; a subsequent fresh tick succeeds, and a changed server offset remains blocked. Tests also cover no expiry across dates, retained explicit bounds, unchanged DST conversions, saved-setting restart, backup preservation, write failure and worker locking.
+- Local standard suite: **133 tests run, 124 passed, 9 skipped** (6 opt-in whole-brain tests, 2 Windows SDK checks and 1 Chromium test). JavaScript syntax, dependency consistency and whitespace checks passed. Hosted CI separately exercises Windows SDK records, whole-brain integration and Chromium; use the exact commit's Actions result for those outcomes.
+- No connected Windows terminal or broker order was tested locally. A constant +02:00 rule does not automatically follow a future broker DST change; only a confirmed IANA or NY+7 rule provides that mapping.
+
 ## v0.3.0 — gold M1 context, structure and online readout — 2026-11-13 (Asia/Kabul)
 
 - Added a separate gold scalper deployment profile that reads 500 actual closed M1 bars. The previous M5 DQN path is preserved and explicitly rejects M1 training through its M5 simulator.

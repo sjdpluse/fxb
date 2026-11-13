@@ -3,7 +3,9 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import time
+import uuid
 from pathlib import Path
 from .data import load_bars, save_bars, synthetic_bars, FEATURE_NAMES
 from .brain import import_connectome
@@ -25,6 +27,11 @@ def parser():
     c = commands.add_parser("clock-check", help="Read-only UTC/MT5 timestamp check using the saved workstation account")
     c.add_argument("--root", default=".")
     c.add_argument("--symbols", nargs="+", required=True)
+    c = commands.add_parser("clock-set", help="Save a broker clock rule; no date expiry unless both dates are supplied. Sends no orders")
+    c.add_argument("--root", default=".")
+    c.add_argument("--zone", required=True, help="Explicit fixed offset, UTC, or a confirmed IANA/NY+7 rule")
+    c.add_argument("--valid-from")
+    c.add_argument("--valid-until")
     c = commands.add_parser("scalp-prepare", help="Prepare the gold M1 online profile from 500 recent closed bars; sends no orders")
     c.add_argument("--root", default=".")
     c.add_argument("--symbol", default="XAUUSD.m")
@@ -89,13 +96,39 @@ def parser():
     c.add_argument("--sync", action="store_true")
     for name in ("export-mt5", "demo", "reconcile"):
         c = commands.choices[name]
-        c.add_argument("--broker-zone", default="UTC", help="UTC, a bounded offset such as +02:00, a confirmed IANA zone, or NY+7")
+        c.add_argument("--broker-zone", default="UTC", help="UTC, an explicit offset such as +02:00, a confirmed IANA zone, or NY+7")
         c.add_argument("--clock-valid-from", help="UTC start of the configured clock interval, inclusive")
         c.add_argument("--clock-valid-until", help="UTC end of the configured clock interval, exclusive")
     return p
 
 
 def run(args):
+    if args.command == "clock-set":
+        clock = BrokerClock(args.zone, args.valid_from, args.valid_until)
+        state = Path(args.root).resolve() / "state"
+        path = state / "workstation.json"
+        with WorkerLock(state / "runtime.sqlite"):
+            original = path.read_bytes()
+            config = json.loads(original.decode("utf-8-sig"))
+            if not isinstance(config, dict) or not config.get("login") or not config.get("server"):
+                raise ValueError("Save the exact MT5 account and server in the workstation first")
+            config["broker_clock"] = clock.config()
+            backup = state / f"workstation.clock-backup-{uuid.uuid4().hex}.json"
+            backup.write_bytes(original)
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=state,
+                                                 prefix=".clock-", suffix=".tmp", delete=False) as f:
+                    temporary = Path(f.name)
+                    json.dump(config, f, indent=2, allow_nan=False)
+                    f.flush()
+                    os.fsync(f.fileno())
+                temporary.replace(path)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+        return {"status": "saved", "broker_clock": clock.config(), "backup": str(backup),
+                "orders_sent": 0, "restart_workstation": True}
     if args.command == "scalp-prepare":
         from .workstation import Workstation
         from .scalper_runtime import create_profile

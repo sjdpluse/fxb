@@ -193,8 +193,11 @@ class MT5:
                 or tick.bid <= 0 or tick.ask < tick.bid):
             raise Blocked("Missing, stale or invalid executable quote")
         tick = self.timed_record(tick, ("time", "time_msc"))
-        if not -2 <= now - tick.time_msc / 1000 <= 10:
-            raise Blocked("Quote time differs from UTC or is stale; verify Windows clock and the configured broker clock policy")
+        age = now - tick.time_msc / 1000
+        if age > 10:
+            raise Blocked("Waiting for a fresh MT5 quote: stale (older than 10 seconds); check the price feed and broker clock offset")
+        if not math.isfinite(age) or age < -2:
+            raise Blocked("Quote time is ahead of UTC; verify Windows clock and the configured broker clock offset")
         return tick
 
     def clock_snapshot(self, symbol):
@@ -202,15 +205,23 @@ class MT5:
         raw = self.api.symbol_info_tick(symbol)
         now = time.time()
         result = {"symbol": symbol, "windows_utc": datetime.fromtimestamp(now, timezone.utc).isoformat(),
-                  "broker_clock": self.clock.config(), "ready": False}
+                  "broker_clock": self.clock.config(), "ready": False, "status": "blocked"}
         if raw is not None:
             result["raw_time_msc"] = raw.time_msc
         try:
+            # Publish the normalized timestamp even when the feed is stale, so
+            # a stopped tick is distinguishable from an expired clock policy.
+            if raw is not None:
+                at = self.utc(raw.time_msc / 1000)
+                result.update(quote_utc=datetime.fromtimestamp(at, timezone.utc).isoformat(),
+                              quote_age_seconds=now - at)
             quote = self.checked_tick(raw, now)
-            result.update(ready=True, quote_utc=datetime.fromtimestamp(quote.time_msc / 1000, timezone.utc).isoformat(),
+            result.update(ready=True, status="ready", quote_utc=datetime.fromtimestamp(quote.time_msc / 1000, timezone.utc).isoformat(),
                           quote_age_seconds=now - quote.time_msc / 1000)
         except (Blocked, ValueError) as e:
             result["reason"] = str(e)
+            if result.get("quote_age_seconds", 0) > 10:
+                result["status"] = "waiting_for_quote"
         return result
 
     def positions(self):

@@ -18,18 +18,29 @@ NOVEMBER = {"zone": "+02:00", "valid_from": "2026-11-02T00:00:00Z",
 
 
 class ClockTests(unittest.TestCase):
-    def test_fixed_offset_is_bounded_and_utc_default_unchanged(self):
+    def test_optional_bounds_are_enforced_and_utc_default_unchanged(self):
         t = instant("2026-11-11T11:03:02Z")
         clock = BrokerClock.from_config(NOVEMBER)
         self.assertEqual(clock.to_utc(t + 7200), t)
         self.assertEqual(clock.from_utc(t), t + 7200)
         self.assertEqual(BrokerClock().to_utc(t), t)
-        for config in ({"zone": "+02:00"}, {**NOVEMBER, "zone": "+14:01"},
+        for config in ({"zone": "+02:00", "valid_from": NOVEMBER["valid_from"]},
+                       {"zone": "+02:00", "valid_until": NOVEMBER["valid_until"]}, {**NOVEMBER, "zone": "+14:01"},
                        {**NOVEMBER, "valid_from": "2026-11-02T00:00:00"}, {"unknown": 1}):
             with self.subTest(config=config), self.assertRaises(ValueError):
                 BrokerClock.from_config(config)
         with self.assertRaises(ValueError): clock.to_utc(instant("2026-07-31T21:00:00Z"))
         with self.assertRaises(ValueError): clock.to_utc(float("nan"))
+
+    def test_unbounded_fixed_offset_does_not_expire_or_claim_seasonal_changes(self):
+        clock = BrokerClock("+02:00")
+        for date in ("2026-11-13T16:30:00Z", "2027-01-01T00:00:00Z", "2027-07-01T00:00:00Z"):
+            t = instant(date)
+            self.assertEqual(clock.to_utc(t + 7200), t)
+            self.assertEqual(clock.from_utc(t), t + 7200)
+        self.assertTrue(clock.compatible(NOVEMBER))
+        self.assertFalse(BrokerClock.from_config(NOVEMBER).compatible(clock.config()))
+        self.assertFalse(clock.compatible({"zone": "Europe/Helsinki"}))
 
     def test_confirmed_iana_zone_converts_each_historical_date(self):
         clock = BrokerClock("Europe/Helsinki")
@@ -83,6 +94,32 @@ class BrokerTimeIntegrationTests(unittest.TestCase):
         self.api.quote.time_msc += 2400
         with patch("fxb.mt5.time.time", return_value=self.now):
             result = self.bridge.clock_snapshot("XAUUSD")
+        self.assertFalse(result["ready"])
+        self.assertEqual(self.api.calls, 0)
+
+    def test_reported_november_13_stopped_tick_remains_blocked_after_removing_expiry(self):
+        self.bridge = MT5(self.api, clock={"zone": "+02:00"})
+        self.api.quote.time_msc = 1794594566753
+        for text, age in (("2026-11-13T16:29:56.479011Z", 29.726011),
+                          ("2026-11-13T16:29:58.888986Z", 32.135986),
+                          ("2026-11-13T16:30:03.603197Z", 36.850197)):
+            with patch("fxb.mt5.time.time", return_value=instant(text)):
+                result = self.bridge.clock_snapshot("XAUUSD.m")
+            self.assertFalse(result["ready"])
+            self.assertEqual(result["status"], "waiting_for_quote")
+            self.assertAlmostEqual(result["quote_age_seconds"], age, places=5)
+            self.assertEqual(result["quote_utc"], "2026-11-13T16:29:26.753000+00:00")
+            self.assertNotIn("policy does not cover", result["reason"])
+        # The same instance recovers immediately when new ticks arrive.
+        now = instant("2026-11-13T16:30:05Z")
+        self.api.quote.time_msc = (now + 7200 - .2) * 1000
+        with patch("fxb.mt5.time.time", return_value=now):
+            result = self.bridge.clock_snapshot("XAUUSD.m")
+        self.assertTrue(result["ready"])
+        # A changed server offset must not be mistaken for a fresh quote.
+        self.api.quote.time_msc += 3600000
+        with patch("fxb.mt5.time.time", return_value=now):
+            result = self.bridge.clock_snapshot("XAUUSD.m")
         self.assertFalse(result["ready"])
         self.assertEqual(self.api.calls, 0)
 

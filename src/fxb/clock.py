@@ -2,7 +2,9 @@
 
 MT5 transports may expose either UTC epochs or server wall-clock digits encoded
 as epochs. UTC remains the default. Non-UTC sources require an operator-supplied
-policy; fixed offsets also require a bounded validity interval. IANA zones and
+policy. Validity bounds are optional, including for fixed offsets. A fixed
+offset remains constant; removing its expiry does not establish a DST rule or
+validate historical data that used a different offset. IANA zones and
 the NY+7 convention handle historical DST only when that rule is confirmed for
 the particular server. Ambiguous/nonexistent local times are rejected.
 """
@@ -43,15 +45,15 @@ class BrokerClock:
                 raise ValueError("Broker UTC offset must be within 14 hours and aligned to M5")
             offset = (hours * 60 + minutes) * (1 if fixed[1] == "+" else -1)
             tz = timezone(timedelta(minutes=offset))
-            if not self.valid_from or not self.valid_until:
-                raise ValueError("Fixed broker offsets require valid_from and valid_until; do not apply today's offset to all history")
+            if (self.valid_from is None) != (self.valid_until is None):
+                raise ValueError("For a fixed offset, provide both validity dates or leave both empty for no expiry")
         else:
             name = "America/New_York" if self.zone == "NY+7" else self.zone
             shift = 7 * 3600 if self.zone == "NY+7" else 0
             try:
                 tz = ZoneInfo(name)
             except (ZoneInfoNotFoundError, ValueError) as e:
-                raise ValueError("Unknown broker time zone; install tzdata on Windows or use a bounded offset") from e
+                raise ValueError("Unknown broker time zone; install tzdata on Windows or use an explicit offset") from e
         lower = instant(self.valid_from) if self.valid_from is not None else -math.inf
         upper = instant(self.valid_until) if self.valid_until is not None else math.inf
         if lower >= upper:
