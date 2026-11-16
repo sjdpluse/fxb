@@ -1,5 +1,15 @@
 # Validation record
 
+## v0.3.2 — M1 read-time freshness and automatic news calendar — 2026-11-16 (Asia/Kabul)
+
+- Reproduced a minute-boundary race: the runtime compared a newly retrieved closed bar to a clock sampled before slow account/history reads. Freshness now uses the clock after retrieval. The same change rejects data that became stale during a slow read. Strict `[0, 60)` second M1 freshness and the independent order deadline are preserved.
+- Profile preparation rejects stale/future context before creating a profile directory. Existing profiles and learned state are retained. The execution panel exposes the latest close, evaluation time and age; stale history and future timestamps have distinct statuses.
+- Added read-only `market-check` with three samples by default: raw and normalized M1 timestamps (including clearly labelled position zero), last closed-bar age, available close/tick-volume fields, quote bid/ask/time, read latency and calendar status. It neither guesses a clock correction nor sends orders. Screenshots alone do not establish whether this user's persistent stop came from the race, cached history or differing timestamp encodings; the Windows diagnostic is still needed to distinguish those cases.
+- Added the provider's own Forex Factory weekly JSON export, UTC/impact conversion, current-week/source-age checks, hourly caching, atomic writes and independent background refresh. Invalid/empty/non-USD/wrong-week responses and ambiguous schema/duplicate impacts fail closed. Network failures preserve the previous file and its update time. Manual uploads disable auto refresh; preview cannot enable it. No network request is made in the position-management loop.
+- Local standard suite: **149 tests run, 140 passed, 9 skipped** (6 opt-in whole-brain, 2 Windows SDK, 1 Chromium). The scalper suite with the complete published graph enabled passed **30 tests in 5.222 seconds**. Targeted quote/clock/native-record-protocol tests also passed after adding diagnostic prices. Python compilation, JavaScript syntax, dependency consistency and whitespace checks passed.
+- An actual provider request on November 16 returned 120 events for the current week, source update `2026-11-16T07:42:18Z` and coverage end `2026-11-22T05:00:00Z`; conversion and the calendar gate succeeded without MT5 or orders. This verifies the provider adapter here, not the user's Windows network path or unscheduled-news coverage.
+- The local browser test could not launch because its required Chromium executable was absent. Hosted CI installs Chromium and separately exercises Windows SDK records and full-graph integration; the exact commit's Actions result records those outcomes. No real connected MT5 execution or profitability test was performed in this environment.
+
 ## v0.3.1 — optional broker clock expiry — 2026-11-13 (Asia/Kabul)
 
 - Fixed offsets now accept empty validity dates for operation without calendar expiry. Explicit bounded policies remain enforced. Removing bounds preserves compatibility with profiles using the same fixed offset; it does not infer a seasonal rule or establish the offset of older historical data.

@@ -11,7 +11,7 @@ from unittest.mock import patch
 import numpy as np
 from fxb.data import Bars, synthetic_bars, iso
 from fxb.memory import Memory
-from fxb.mt5 import MT5, MAGIC, Blocked
+from fxb.mt5 import MT5, MAGIC, Blocked, closed_bar_status
 from fxb.execution import LiveAuthorization
 from fxb.scalping import (analyze, FEATURES, VERSION, READOUT_DIM, ScalpConfig,
     scalp_risk, learning_state, entry_score, readout_context, learn_closed)
@@ -164,6 +164,24 @@ class M1TransportTests(unittest.TestCase):
             call.assert_called_once_with("XAUUSD.m",1,1,500)
         self.assertEqual(len(result.time),500)
 
+    def test_bar_age_boundaries_remain_strict(self):
+        for age, status in ((-.01, "bar_clock_ahead"), (0, "ready"), (59.99, "ready"),
+                            (60, "waiting_for_bars"), (7200, "waiting_for_bars")):
+            report = closed_bar_status(1704067200, 60, 1704067260 + age)
+            self.assertEqual(report["status"], status)
+            self.assertAlmostEqual(report["age_seconds"], age, places=5)
+
+    def test_stale_context_cannot_be_saved_as_a_ready_profile(self):
+        b=fixture();b.synthetic=False;bridge=MT5(FakeMT5())
+        with tempfile.TemporaryDirectory() as temp:
+            output=Path(temp)/"profile"
+            with patch.object(bridge,"spec",return_value=b.spec), patch.object(bridge,"bars",return_value=b), \
+                 patch("time.time",return_value=float(b.time[-1]+121)):
+                with self.assertRaisesRegex(Blocked,"history is stale"):
+                    create_profile(bridge,b.spec.symbol,output,0,0,0)
+            self.assertFalse(output.exists())
+            self.assertEqual(bridge.api.calls,0)
+
     def test_structural_risk_size_and_too_wide_stop(self):
         api=FakeMT5();bridge=MT5(api);spec=fixture().spec
         for side,stop in ((1,1999.3),(-1,2001.0)):
@@ -283,6 +301,30 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(self.run_cycle()["reason"],"entry_window_expired")
         self.assertEqual(self.api.calls,0)
 
+    def test_slow_history_crossing_minute_does_not_reject_a_newly_closed_bar(self):
+        def slow_history(*args):
+            self.now += 60
+            self.b.time += 60
+            self.api.quote.time_msc = self.now * 1000
+            return ()
+        with patch.object(self.bridge,"history_deals",side_effect=slow_history):
+            result = self.run_cycle()
+        self.assertEqual(result["status"],"sent")
+        self.assertEqual(self.bridge.scalp_status["market_data"]["age_seconds"],5)
+
+    def test_slow_fetch_cannot_accept_a_bar_that_became_stale(self):
+        def slow_history(*args):
+            self.now += 65
+            return ()
+        self.brain.observe=lambda *a: self.fail("Stale bars must not stimulate the brain")
+        with patch.object(self.bridge,"history_deals",side_effect=slow_history):
+            with self.assertRaisesRegex(Blocked,"history is stale"):
+                self.run_cycle()
+        report=self.bridge.scalp_status["market_data"]
+        self.assertEqual(report["age_seconds"],70)
+        self.assertEqual(report["status"],"waiting_for_bars")
+        self.assertEqual(self.api.calls,0)
+
     def test_consecutive_loss_pause(self):
         self.m.put_state("scalp-learning:"+self.scope,{"loss_streak":3,"last_exit":self.now-100})
         self.assertEqual(self.run_cycle()["reason"],"consecutive_loss_pause")
@@ -341,7 +383,8 @@ class FullScalperTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             b.synthetic=False
             bridge=MT5(FakeMT5())
-            with patch.object(bridge,"spec",return_value=b.spec),patch.object(bridge,"bars",return_value=b):
+            with patch.object(bridge,"spec",return_value=b.spec),patch.object(bridge,"bars",return_value=b), \
+                 patch("time.time",return_value=float(b.time[-1]+65)):
                 result=create_profile(bridge,b.spec.symbol,Path(temp)/"profile",0,0,0)
             loaded,meta,digest=policy(bridge,result["model"])
             self.assertEqual(meta["features"],FEATURES)

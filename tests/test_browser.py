@@ -39,6 +39,10 @@ class BrowserTests(unittest.TestCase):
                         self.assertEqual(page.locator('#scalp-form [name="symbol"]').input_value(),"XAUUSD.m")
                         page.locator('[data-page="execution"]').click()
                         self.assertTrue(page.locator("#scalp-status").is_visible())
+                        self.assertTrue(page.locator("#market-data-status").is_visible())
+                        page.locator('[data-page="settings"]').click()
+                        self.assertTrue(page.locator("#calendar-auto-button").is_visible())
+                        self.assertTrue(page.locator("#calendar-auto-button").is_disabled())
                         self.assertEqual(errors,[])
                         browser.close()
                 finally:

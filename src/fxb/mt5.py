@@ -11,7 +11,7 @@ import uuid
 from types import SimpleNamespace
 import numpy as np
 from .clock import BrokerClock
-from .data import Bars, KABUL, day_key, timestamp, features
+from .data import Bars, KABUL, day_key, timestamp, features, iso
 from .risk import Spec, Guard, Risk, levels, size_lots
 from .simulator import portfolio_state, ACTION_NAMES
 from .research import load_checkpoint
@@ -26,6 +26,21 @@ ORDER_CAPABILITY_TP = 32
 
 class Blocked(RuntimeError):
     pass
+
+
+def closed_bar_status(opened_at, period, now):
+    """Evaluate a completed bar against the clock AFTER the API read finishes."""
+    closed_at = float(opened_at) + period
+    age = float(now) - closed_at
+    if not math.isfinite(age) or period not in (60, 300):
+        raise Blocked("Invalid closed-bar timestamp or timeframe")
+    status = "ready" if 0 <= age < period else "waiting_for_bars" if age >= period else "bar_clock_ahead"
+    reason = {"ready": "Latest closed bar is current",
+              "waiting_for_bars": "MT5 closed-bar history is stale; waiting for a current bar",
+              "bar_clock_ahead": "Closed-bar time is ahead of UTC; verify the bar clock mapping"}[status]
+    return {"ready": status == "ready", "status": status, "reason": reason,
+            "timeframe": f"M{period // 60}", "bar_open_utc": iso(opened_at),
+            "bar_close_utc": iso(closed_at), "checked_at_utc": iso(now), "age_seconds": age}
 
 
 class WorkerLock:
@@ -208,6 +223,8 @@ class MT5:
                   "broker_clock": self.clock.config(), "ready": False, "status": "blocked"}
         if raw is not None:
             result["raw_time_msc"] = raw.time_msc
+            result["bid"] = float(raw.bid) if math.isfinite(raw.bid) else None
+            result["ask"] = float(raw.ask) if math.isfinite(raw.ask) else None
         try:
             # Publish the normalized timestamp even when the feed is stale, so
             # a stopped tick is distinguishable from an expired clock policy.
@@ -222,6 +239,35 @@ class MT5:
             result["reason"] = str(e)
             if result.get("quote_age_seconds", 0) > 10:
                 result["status"] = "waiting_for_quote"
+        return result
+
+    def market_snapshot(self, symbol):
+        """Read-only raw/UTC comparison; position zero is diagnostic, never a signal."""
+        self.symbol(symbol)
+        started = time.time()
+        raw = self.api.copy_rates_from_pos(symbol, self.api.TIMEFRAME_M1, 0, 4)
+        finished = time.time()
+        result = {"symbol": symbol, "ready": False, "broker_clock": self.clock.config(),
+                  "bars_read_seconds": finished - started, "bars": []}
+        try:
+            if raw is None or len(raw) < 2:
+                raise Blocked("M1 history is not yet available in MT5; open this symbol's M1 chart")
+            if not np.isfinite(raw["time"]).all() or np.any(np.diff(raw["time"]) <= 0):
+                raise Blocked("Invalid or unordered M1 history returned by MT5")
+            for i, row in enumerate(raw):
+                opened = self.utc(float(row["time"]))
+                result["bars"].append({"position": len(raw) - i - 1,
+                    "raw_time": int(row["time"]), "open_utc": iso(opened),
+                    "close_utc": iso(opened + 60)})
+                for field in ("close", "tick_volume"):
+                    if field in raw.dtype.names:
+                        value = float(row[field])
+                        result["bars"][-1][field] = value if math.isfinite(value) else None
+            result["closed_bar"] = closed_bar_status(self.utc(float(raw["time"][-2])), 60, finished)
+        except (Blocked, ValueError) as e:
+            result["reason"] = str(e)
+        result["quote"] = self.clock_snapshot(symbol)
+        result["ready"] = result.get("closed_bar", {}).get("ready", False) and result["quote"]["ready"]
         return result
 
     def positions(self):

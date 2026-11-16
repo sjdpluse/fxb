@@ -1,6 +1,7 @@
 """Workstation, full connectome, training, market data and controlled execution."""
 import argparse
 import json
+import math
 import os
 import sys
 import tempfile
@@ -11,7 +12,7 @@ from .data import load_bars, save_bars, synthetic_bars, FEATURE_NAMES
 from .brain import import_connectome
 from .research import train, evaluate_file, walk_forward
 from .memory import Memory, SupabaseSink
-from .mt5 import MT5, Blocked, WorkerLock, cycle, reconcile
+from .mt5 import MT5, Blocked, WorkerLock, NewsGate, cycle, reconcile
 from .clock import BrokerClock
 
 
@@ -27,6 +28,14 @@ def parser():
     c = commands.add_parser("clock-check", help="Read-only UTC/MT5 timestamp check using the saved workstation account")
     c.add_argument("--root", default=".")
     c.add_argument("--symbols", nargs="+", required=True)
+    c = commands.add_parser("market-check", help="Read-only raw/UTC M1, quote and calendar diagnostics; sends no orders")
+    c.add_argument("--root", default=".")
+    c.add_argument("--symbols", nargs="+", required=True)
+    c.add_argument("--samples", type=int, choices=range(1, 6), default=3)
+    c.add_argument("--interval", type=float, default=2)
+    c = commands.add_parser("calendar-update", help="Fetch the current weekly news calendar; no trading requests")
+    c.add_argument("--root", default=".")
+    c.add_argument("--auto", action="store_true", help="Persist hourly background updates while the workstation is open")
     c = commands.add_parser("clock-set", help="Save a broker clock rule; no date expiry unless both dates are supplied. Sends no orders")
     c.add_argument("--root", default=".")
     c.add_argument("--zone", required=True, help="Explicit fixed offset, UTC, or a confirmed IANA/NY+7 rule")
@@ -103,6 +112,42 @@ def parser():
 
 
 def run(args):
+    if args.command == "calendar-update":
+        from .news import refresh_calendar, atomic_json
+        root = Path(args.root).resolve()
+        path = root / "state/workstation.json"
+        with WorkerLock(root / "state/runtime.sqlite"):
+            config = json.loads(path.read_text(encoding="utf-8-sig"))
+            if not isinstance(config, dict):
+                raise ValueError("Invalid workstation configuration")
+            result = refresh_calendar(root / "data/news-auto.json")
+            config.update(calendar="data/news-auto.json", calendar_auto=args.auto)
+            atomic_json(path, config)
+        return result | {"automatic": args.auto, "restart_workstation": True}
+    if args.command == "market-check":
+        if not math.isfinite(args.interval) or not 1 <= args.interval <= 10:
+            raise ValueError("Choose a sample interval between 1 and 10 seconds")
+        root = Path(args.root).resolve()
+        config = json.loads((root / "state/workstation.json").read_text(encoding="utf-8-sig"))
+        if not config.get("login") or not config.get("server"):
+            raise ValueError("Save the exact MT5 account and server in the workstation first")
+        bridge = MT5(terminal=config.get("terminal") or None, clock=config.get("broker_clock"))
+        try:
+            bridge.connect()
+            bridge.account(config["login"], expected_server=config["server"])
+            samples = []
+            for i in range(args.samples):
+                if i: time.sleep(args.interval)
+                samples.append([bridge.market_snapshot(s) for s in args.symbols])
+            try:
+                NewsGate(str(root / config.get("calendar", "data/news.json"))).check(time.time(), 300)
+                news = {"ready": True}
+            except (Blocked, ValueError, OSError) as e:
+                news = {"ready": False, "reason": str(e)}
+            return {"market_ready": all(s["ready"] for s in samples[-1]), "samples": samples,
+                    "calendar": news, "orders_sent": 0}
+        finally:
+            bridge.close()
     if args.command == "clock-set":
         clock = BrokerClock(args.zone, args.valid_from, args.valid_until)
         state = Path(args.root).resolve() / "state"

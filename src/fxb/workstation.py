@@ -16,7 +16,7 @@ import uuid
 import numpy as np
 from . import __version__
 from .connectome import WholeBrain, install, read_manifest, geometry, sha256
-from .data import load_bars, save_bars
+from .data import load_bars, save_bars, timestamp
 from .clock import BrokerClock
 from .execution import LiveAuthorization
 from .memory import Memory, SupabaseSink
@@ -42,6 +42,10 @@ class Workstation:
         self.job = {"status": "idle", "kind": None}
         self.cancel_job = threading.Event()
         self.worker_stop = threading.Event()
+        self.calendar_stop = threading.Event()
+        self.calendar_wake = threading.Event()
+        self.calendar_thread = None
+        self.calendar_refresh = {"status": "disabled"}
         self.bridge = None
         self.brain = None
         self.worker = None
@@ -55,7 +59,7 @@ class Workstation:
         self.events = []
         self.last_error = None
         self.active_models = []
-        self.config = {"login": None, "server": "", "terminal": "", "calendar": "data/news.json",
+        self.config = {"login": None, "server": "", "terminal": "", "calendar": "data/news.json", "calendar_auto": False,
                        "broker_clock": BrokerClock().config()}
         path = self.state_dir / "workstation.json"
         if path.exists():
@@ -125,6 +129,8 @@ class Workstation:
             news = {"ready": True, "reason": f"Calendar covers the next {horizon//60} minutes"}
         except (Blocked, OSError, ValueError) as e:
             news = {"ready": False, "reason": str(e)}
+        news["automatic"] = bool(self.config.get("calendar_auto"))
+        news["refresh"] = dict(self.calendar_refresh)
         return {"version": __version__, "preview": self.preview, "platform": os.name, "news": news,
                 "running": bool(self.worker and self.worker.is_alive()), "entries_enabled": self.entries_enabled,
                 "mode": self.mode, "account": self.account_data, "positions": self.positions, "quotes": self.quotes,
@@ -186,6 +192,7 @@ class Workstation:
             raise ValueError("A positive MT5 account number is required")
         if "calendar" in allowed:
             self.resolve(allowed["calendar"], "data", must_exist=False)
+            allowed["calendar_auto"] = False
         if "broker_clock" in allowed:
             allowed["broker_clock"] = BrokerClock.from_config(allowed["broker_clock"]).config()
         if self.bridge:
@@ -197,6 +204,67 @@ class Workstation:
         self.config.update(allowed)
         (self.state_dir / "workstation.json").write_text(json.dumps(self.config, indent=2), encoding="utf-8")
         return self.config
+
+    def enable_calendar_auto(self):
+        if self.preview:
+            raise Blocked("Automatic calendar updates require the local workstation")
+        from .news import atomic_json, SOURCE
+        self.config.update(calendar="data/news-auto.json", calendar_auto=True)
+        atomic_json(self.state_dir / "workstation.json", self.config)
+        self.start_calendar_refresh()
+        self.calendar_wake.set()
+        return {"status": "enabled", "source": SOURCE, "orders_sent": 0}
+
+    def start_calendar_refresh(self):
+        if self.preview or not self.config.get("calendar_auto"):
+            return
+        if self.calendar_thread and self.calendar_thread.is_alive():
+            return
+        from .news import load_weekly, atomic_json, REFRESH_SECONDS
+        self.calendar_stop.clear()
+        def run():
+            while not self.calendar_stop.is_set():
+                self.calendar_wake.clear()
+                with self.lock:
+                    enabled = self.config.get("calendar_auto", False)
+                    selected = self.config["calendar"]
+                delay = 60
+                if enabled:
+                    try:
+                        path = self.resolve(selected, "data", must_exist=False)
+                        self.calendar_refresh = {"status": "refreshing"}
+                        doc, cached = load_weekly(path)
+                        with self.lock:
+                            if (not self.calendar_stop.is_set() and self.config.get("calendar_auto")
+                                    and self.config["calendar"] == selected):
+                                if not cached:
+                                    atomic_json(path, doc)
+                                self.calendar_refresh = {"status": "cached" if cached else "updated",
+                                    "updated_at": doc["updated_at"], "events": len(doc["events"])}
+                        delay = max(30, REFRESH_SECONDS - (time.time() - timestamp(doc["fetched_at"])))
+                    except Exception as e:
+                        # No network call runs in the trading loop. A failed
+                        # download keeps the old file and its original expiry.
+                        self.calendar_refresh = {"status": "error", "reason": str(e)}
+                        delay = 300
+                        retry = (getattr(e, "headers", None) or {}).get("Retry-After", "")
+                        if str(retry).isdigit():
+                            delay = max(delay, int(retry))
+                        elif retry:
+                            from email.utils import parsedate_to_datetime
+                            try:
+                                delay = max(delay, parsedate_to_datetime(retry).timestamp() - time.time())
+                            except (ValueError, TypeError, OverflowError):
+                                pass
+                self.calendar_wake.wait(delay)
+        self.calendar_thread = threading.Thread(target=run, daemon=True, name="fxb-calendar")
+        self.calendar_thread.start()
+
+    def stop_calendar_refresh(self):
+        self.calendar_stop.set()
+        self.calendar_wake.set()
+        if self.calendar_thread:
+            self.calendar_thread.join(timeout=1)
 
     def connect(self):
         if self.preview:
@@ -399,6 +467,11 @@ class Workstation:
             if str(e) != "High-impact USD news blackout":
                 raise
         target = self.resolve(self.config["calendar"], "data", must_exist=False)
+        # A manual upload owns the selected calendar until auto is re-enabled.
+        from .news import atomic_json
+        self.config["calendar_auto"] = False
+        atomic_json(self.state_dir / "workstation.json", self.config)
+        self.calendar_wake.set()
         target.parent.mkdir(parents=True, exist_ok=True)
         path.replace(target)
         return {"saved": self.config["calendar"]}

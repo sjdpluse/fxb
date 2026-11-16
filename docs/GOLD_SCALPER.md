@@ -1,4 +1,4 @@
-# Gold M1 scalper — 0.3.0
+# Gold M1 scalper — 0.3.2
 
 This deployment path reads **500 recent, closed M1 bid candles** from the exact
 MT5 gold symbol. It does not require the historical 20,000-bar DQN run. The
@@ -108,10 +108,20 @@ CLI alternative for preparation (provide your own verified cost assumptions):
 Those example cost values are inherited scenarios from this project's November
 11 JustMarkets preparation, not a current broker tariff or measured slippage.
 The 500 candles come fresh from MT5; M5 candles are never upsampled to fake M1.
-The existing bounded broker-clock policy must cover both these candles and the
-history needed for daily risk/settled outcomes. An expired clock interval must
-be verified and renewed explicitly; this release never silently extends it.
-Fresh economic-calendar coverage remains mandatory for new orders.
+Clock validity bounds are optional as of 0.3.1. If explicitly configured, they
+must cover the candles and daily/settlement history. A fixed +02:00 rule does
+not infer the server's seasonal DST rule. In 0.3.2, freshness is checked after
+the API read completes, including profile creation. The execution panel shows
+the latest close and age, and `market-check --symbols XAUUSD.m` reports raw and
+converted M1/quote timestamps without changing clock settings or sending orders.
+
+Fresh economic-calendar coverage remains mandatory. With FXB closed, run
+`python -m fxb calendar-update --auto`, or use the automatic-calendar button in
+the settings panel. Forex Factory's own weekly export is refreshed hourly in a
+separate thread while the workstation is open. Failed or invalid downloads
+preserve the prior file and its original expiry; scheduled high-impact USD
+blackouts remain enforced. Manual uploads disable automatic refresh. This is a
+scheduled-event filter, not a detector for unscheduled news.
 
 The workstation shows current swings, M5 bias, last decision, number of learned
 closed trades and their realized net result. The brain view uses genuine neural

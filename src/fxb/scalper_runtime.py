@@ -10,7 +10,7 @@ import numpy as np
 from .connectome import sha256
 from .data import KABUL, day_key, save_bars
 from .risk import Spec, Risk, Guard
-from .mt5 import Blocked, MAGIC, NewsGate
+from .mt5 import Blocked, MAGIC, NewsGate, closed_bar_status
 from .scalping import (VERSION, FEATURES, ScalpConfig, scalp_risk, analyze,
                        readout_context, entry_score, learning_state, learn_closed)
 
@@ -25,6 +25,9 @@ def create_profile(bridge, symbol, output, commission, slippage, overnight, conf
     bars = bridge.bars(spec, cfg.context_bars)
     if bars.synthetic or len(bars.time) != cfg.context_bars:
         raise ValueError("The scalper needs 500 actual closed M1 bars")
+    market = closed_bar_status(bars.time[-1], 60, time.time())
+    if not market["ready"]:
+        raise Blocked(f"{market['reason']}; close={market['bar_close_utc']}, age={market['age_seconds']:.3f}s")
     raw, atr, signals, structures = analyze(bars, cfg)
     brain = FastWholeBrain()  # manifest + mapping only; graph remains lazy
     output = Path(output)
@@ -40,7 +43,7 @@ def create_profile(bridge, symbol, output, commission, slippage, overnight, conf
         np.savez_compressed(f, meta=np.array(json.dumps(meta, allow_nan=False)))
     return {"model": str(output / "model.npz"), "symbol": symbol, "timeframe": "M1",
             "context_bars": len(raw), "initial_online_samples": 0, "orders_sent": 0,
-            "structure": structures[-1], "profitability_established": False}
+            "structure": structures[-1], "market_data": market, "profitability_established": False}
 
 
 def policy(bridge, path):
@@ -176,8 +179,13 @@ def scalp_cycle(bridge, model_path, memory, expected_login, calendar=None, execu
     if bars.synthetic or len(bars.time) != cfg.context_bars:
         raise Blocked("500 real closed M1 bars are required")
     closed_at = float(bars.time[-1] + 60)
-    if not 0 <= now - closed_at < 60:
-        raise Blocked("Latest closed M1 bar is stale or in the future")
+    # History/API work may cross a minute boundary. The start-of-cycle clock
+    # must not label a newly closed bar as future data or accept an old bar.
+    market = closed_bar_status(bars.time[-1], 60, time.time())
+    bridge.scalp_status["market_data"] = market
+    if not market["ready"]:
+        bridge.scalp_status["last_decision"] = {"action": "WAIT", "reason": market["status"]}
+        raise Blocked(market["reason"])
     key = f"{account_key}:{digest}:M1:{int(closed_at)}"
     decision_key = "decision:" + key + (":execute" if execute else ":observe")
     if memory.get_state(decision_key):

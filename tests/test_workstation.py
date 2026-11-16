@@ -44,7 +44,7 @@ class WorkstationTests(unittest.TestCase):
     def test_preview_has_no_account_or_trading_authority(self):
         with TestClient(create_app(self.root, preview=True, token=self.token)) as client:
             self.assertEqual(client.get("/api/status").status_code, 200)
-            for endpoint in ("execution/start", "account/configure", "data/export", "memory/sync", "calendar/save", "training/start", "scalper/prepare"):
+            for endpoint in ("execution/start", "account/configure", "data/export", "memory/sync", "calendar/save", "calendar/auto", "training/start", "scalper/prepare"):
                 with self.subTest(endpoint=endpoint):
                     self.assertEqual(client.post("/api/" + endpoint, json={}).status_code, 403)
 

@@ -41,7 +41,9 @@ def create_app(root=".", preview=False, token=None):
 
     @asynccontextmanager
     async def lifespan(app):
+        controller.start_calendar_refresh()
         yield
+        controller.stop_calendar_refresh()
         controller.worker_stop.set()
         controller.cancel_job.set()
         if controller.worker:
@@ -155,6 +157,7 @@ def create_app(root=".", preview=False, token=None):
             if action == "execution/flatten": return controller.stop(True)
             if action == "execution/reconcile": return controller.reconcile_orders()
             if action == "calendar/save": return controller.save_calendar(payload)
+            if action == "calendar/auto": return controller.enable_calendar_auto()
             if action == "memory/sync": return controller.sync()
             return JSONResponse({"error": "Unknown operation"}, status_code=404)
 
