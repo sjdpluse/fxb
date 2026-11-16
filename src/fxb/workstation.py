@@ -89,6 +89,7 @@ class Workstation:
                     "encoder": meta.get("encoder_type", meta.get("topology", {}).get("kind", "control")),
                     "run_id": meta["run_id"], "risk": meta["risk"], "source": meta["data_source"],
                     "strategy": meta.get("strategy"), "timeframe_seconds": meta["spec"]["timeframe_seconds"],
+                    "scalp_style": meta.get("scalp_config", {}).get("style", "structure"),
                     "holdout": report.get("holdout"), "selected_epoch": meta.get("selected_epoch"),
                     "sha256": sha256(path)})
             except (ValueError, KeyError, OSError):
@@ -340,17 +341,26 @@ class Workstation:
             return {"model": str((output / "model.npz").relative_to(self.root)), "holdout": result["holdout"]}
         return self.launch_job("train", work)
 
-    def prepare_scalper(self, symbol, commission, slippage, overnight):
+    def prepare_scalper(self, symbol, commission, slippage, overnight, style="structure",
+                        risk_percent=None, max_trades=None, daily_loss_percent=None):
         from .scalper_runtime import create_profile
+        from .scalping import scalp_config, scalp_risk
         if self.preview or self.bridge is None:
             raise Blocked("Connect the local MT5 terminal before preparing the M1 scalper")
         if self.worker and self.worker.is_alive():
             raise ValueError("Stop execution before preparing another trading profile")
+        if any(value is not None and type(value) not in (int, float)
+               for value in (risk_percent, daily_loss_percent)):
+            raise ValueError("Risk percentages must be numbers")
+        config = scalp_config(style)
+        risk = scalp_risk(style, None if risk_percent is None else risk_percent/100,
+                          max_trades, None if daily_loss_percent is None else daily_loss_percent/100)
         safe_symbol = re.sub(r"[^a-zA-Z0-9_.-]", "_", symbol)
-        output = self.root / "runs" / f"{safe_symbol}-M1-scalper-{time.time_ns()}"
+        suffix = "active" if style == "active" else "scalper"
+        output = self.root / "runs" / f"{safe_symbol}-M1-{suffix}-{time.time_ns()}"
         def work(update):
             update({"stage": "reading_M1", "message": "Reading 500 closed gold bars; no historical DQN training"})
-            result = create_profile(self.bridge, symbol, output, commission, slippage, overnight)
+            result = create_profile(self.bridge, symbol, output, commission, slippage, overnight, config, risk)
             result["model"] = str(Path(result["model"]).relative_to(self.root))
             return result
         return self.launch_job("scalp_prepare", work)
@@ -391,6 +401,7 @@ class Workstation:
         # Switching strategies must not retain several full 15M-edge graphs.
         self.bridge._policies = {}
         self.bridge._scalp_policies = {}
+        self.bridge._scalp_tick_history = {}
         self.bridge.scalp_status = None
         gc.collect()
         (self.root / "STOP").unlink(missing_ok=True)
@@ -421,7 +432,7 @@ class Workstation:
                                 blocked_reasons[str(path)] = str(e)
                                 self.note(str(e), "warning", operation="execution_wait")
                                 result = {"action": "WAIT", "status": "blocked", "reason": str(e)}
-                            if result.get("reason") != "already_processed_bar":
+                            if result.get("reason") != "already_processed_bar" and not result.get("repeat"):
                                 self.last_decisions.append(result | {"time": time.time(), "model": path.parent.name})
                                 self.last_decisions = self.last_decisions[-100:]
                         try:

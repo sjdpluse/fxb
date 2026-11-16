@@ -25,7 +25,9 @@ ORDER_CAPABILITY_TP = 32
 
 
 class Blocked(RuntimeError):
-    pass
+    def __init__(self, message, *, code=None, details=None):
+        super().__init__(message)
+        self.code, self.details = code, details
 
 
 def closed_bar_status(opened_at, period, now):
@@ -341,12 +343,19 @@ class MT5:
         slip = math.ceil(spec.slippage_points) * spec.point
         loss = self.api.order_calc_profit(order_type, symbol, ref, entry + side * slip, stop - side * slip)
         margin = self.api.order_calc_margin(order_type, symbol, ref, entry + side * slip)
-        if loss is None or margin is None or not math.isfinite(loss) or loss >= 0:
+        if (loss is None or margin is None or not math.isfinite(loss) or loss >= 0
+                or not math.isfinite(margin) or margin <= 0):
             raise Blocked("Broker could not price stop-loss risk")
         loss_per_lot = -loss / ref + 2 * spec.commission_per_lot_side
         lots = size_lots(account.equity, loss_per_lot, account.margin_free, margin / ref, active_spec, risk)
         if not lots:
-            raise Blocked("Minimum lot would exceed risk or margin budget")
+            raise Blocked("Minimum lot would exceed risk or margin budget", code="minimum_lot_budget",
+                details={"currency": account.currency, "minimum_lot": spec.lot_min,
+                         "minimum_lot_risk_cash": spec.lot_min*loss_per_lot,
+                         "risk_budget_cash": account.equity*risk.fraction,
+                         "minimum_lot_risk_percent": spec.lot_min*loss_per_lot/account.equity*100 if account.equity > 0 else None,
+                         "minimum_lot_margin_cash": spec.lot_min*margin/ref,
+                         "margin_budget_cash": account.margin_free*risk.margin_fraction})
         return {"action": self.api.TRADE_ACTION_DEAL, "symbol": symbol, "volume": lots,
                 "type": order_type, "price": entry, "sl": stop, "tp": target,
                 "deviation": int(math.ceil(spec.slippage_points)), "magic": MAGIC,

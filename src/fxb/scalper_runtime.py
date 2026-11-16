@@ -11,14 +11,17 @@ from .connectome import sha256
 from .data import KABUL, day_key, save_bars
 from .risk import Spec, Risk, Guard
 from .mt5 import Blocked, MAGIC, NewsGate, closed_bar_status
-from .scalping import (VERSION, FEATURES, ScalpConfig, scalp_risk, analyze,
+from .scalping import (VERSION, ACTIVE_VERSION, FEATURES, ScalpConfig, scalp_risk, analyze,
                        readout_context, entry_score, learning_state, learn_closed)
 
 
-def create_profile(bridge, symbol, output, commission, slippage, overnight, config=None):
+def create_profile(bridge, symbol, output, commission, slippage, overnight, config=None, risk=None):
     """Read 500 closed M1 bars; create an untrained adaptive profile, not a DQN."""
     from .fast_brain import FastWholeBrain
     cfg = config or ScalpConfig()
+    risk = risk or scalp_risk(cfg.style)
+    if risk != scalp_risk(cfg.style, risk.fraction, risk.max_trades, risk.daily_loss):
+        raise ValueError("Unsupported scalper risk configuration")
     if not symbol or any(c in symbol for c in "/\\\0") or "XAU" not in symbol.upper():
         raise ValueError("Choose the broker's exact XAU gold symbol")
     spec = bridge.spec(symbol, commission, slippage, overnight, timeframe_seconds=60)
@@ -33,7 +36,8 @@ def create_profile(bridge, symbol, output, commission, slippage, overnight, conf
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
     save_bars(bars, output / "context.csv")
-    meta = {"strategy": VERSION, "spec": asdict(spec), "risk": asdict(scalp_risk()),
+    meta = {"strategy": ACTIVE_VERSION if cfg.style == "active" else VERSION,
+            "spec": asdict(spec), "risk": asdict(risk),
             "scalp_config": asdict(cfg), "features": FEATURES, "encoder_type": "scalp-full-brain",
             "topology": brain.provenance, "time_basis": bars.time_basis, "synthetic": False,
             "data_source": bars.source, "run_id": output.name, "created_at": time.time(),
@@ -54,11 +58,13 @@ def policy(bridge, path):
     if stamp not in cache:
         with np.load(path, allow_pickle=False) as data:
             meta = json.loads(str(data["meta"]))
-        if (meta.get("strategy") != VERSION or meta.get("features") != FEATURES
+        cfg = ScalpConfig(**meta["scalp_config"])
+        risk = Risk(**meta["risk"])
+        if (meta.get("strategy") != (ACTIVE_VERSION if cfg.style == "active" else VERSION)
+                or meta.get("features") != FEATURES
                 or meta["spec"]["timeframe_seconds"] != 60 or "XAU" not in meta["spec"]["symbol"].upper()
-                or meta["risk"] != asdict(scalp_risk())):
+                or risk != scalp_risk(cfg.style, risk.fraction, risk.max_trades, risk.daily_loss)):
             raise Blocked("Unsupported or changed M1 scalper profile")
-        ScalpConfig(**meta["scalp_config"])
         brain = FastWholeBrain()
         if brain.provenance != meta["topology"]:
             raise Blocked("The scalper's connectome provenance changed; create a new profile")
@@ -70,6 +76,26 @@ def policy(bridge, path):
 
 def learning_scope(account, model_hash):
     return hashlib.sha256(f"{account.server}:{account.login}:{account.trade_mode}:{model_hash}".encode()).hexdigest()
+
+
+def decision_stats(memory, scope, decision, now):
+    """Count distinct bars/reasons, not two-second polls; keep today's totals on disk."""
+    key = "scalp-stats:" + scope + ":" + day_key(now)
+    stats = memory.get_state(key, {"bars": 0, "signal_bars": 0, "reasons": {}, "last_bar": None})
+    before = json.dumps(stats, sort_keys=True)
+    bar = decision["bar_closed_at"]
+    if stats["last_bar"] != bar:
+        stats.update(last_bar=bar, bars=stats["bars"]+1, seen_reasons=[], signal_seen=False)
+    if decision.get("setup") and not stats["signal_seen"]:
+        stats["signal_bars"] += 1
+        stats["signal_seen"] = True
+    reason = decision.get("reason_code", decision["reason"])
+    if decision["action"] == "WAIT" and reason not in stats["seen_reasons"]:
+        stats["seen_reasons"].append(reason)
+        stats["reasons"][reason] = stats["reasons"].get(reason, 0) + 1
+    if json.dumps(stats, sort_keys=True) != before:
+        memory.put_state(key, stats)
+    return {k: stats[k] for k in ("bars", "signal_bars", "reasons")}
 
 
 def settle_attempts(memory, scope, symbol, deals, positions, now, config):
@@ -172,9 +198,15 @@ def scalp_cycle(bridge, model_path, memory, expected_login, calendar=None, execu
     settle_attempts(memory, scope, spec.symbol, deals, positions, now, cfg)
     learned = learning_state(memory, scope)
     public_learning = {k: v for k, v in learned.items() if k != "weights"}
+    entry_gate = ("entries_paused" if not entries_enabled else "account_has_exposure" if positions or pending
+                  else "uncertain_order_requires_reconciliation" if memory.unresolved() else guard.reason(risk))
     bridge.scalp_status = (getattr(bridge, "scalp_status", None) or {}) | {
                            "symbol": spec.symbol, "timeframe": "M1", "context_bars": 500,
-                           "learning": public_learning, "risk": meta["risk"], "execution": execute}
+                           "learning": public_learning, "risk": meta["risk"], "execution": execute,
+                           "style": cfg.style, "entries_today": guard.entries,
+                           "risk_budget_cash": account.equity*risk.fraction,
+                           "entry_gate": entry_gate, "risk_peak_equity": guard.peak,
+                           "day_start_equity": guard.day_start}
     bars = bridge.bars(spec, cfg.context_bars)
     if bars.synthetic or len(bars.time) != cfg.context_bars:
         raise Blocked("500 real closed M1 bars are required")
@@ -188,7 +220,8 @@ def scalp_cycle(bridge, model_path, memory, expected_login, calendar=None, execu
         raise Blocked(market["reason"])
     key = f"{account_key}:{digest}:M1:{int(closed_at)}"
     decision_key = "decision:" + key + (":execute" if execute else ":observe")
-    if memory.get_state(decision_key):
+    previous_decision = memory.get_state(decision_key)
+    if previous_decision and (cfg.style != "active" or previous_decision.get("action") in ("BUY", "SELL", "CLOSE")):
         return {"action": "WAIT", "reason": "already_processed_bar"}
     raw, atr, signals, structure = analyze(bars, cfg)
     encoded = None
@@ -196,11 +229,25 @@ def scalp_cycle(bridge, model_path, memory, expected_login, calendar=None, execu
         if brain.last_time is not None and brain.last_time < bars.time[0]:
             brain.reset()
         encoded = brain.observe(raw, bars.time)
-    decision = {"action": "WAIT", "reason": "no_confirmed_setup", "bar_closed_at": closed_at,
-                "strategy": VERSION, "structure": structure[-1], "learning": public_learning,
+    decision = {"action": "WAIT", "reason": entry_gate or "no_confirmed_setup", "bar_closed_at": closed_at,
+                "strategy": meta["strategy"], "structure": structure[-1], "learning": public_learning,
                 "features": dict(zip(FEATURES, raw[-1].tolist()))}
     signal = signals[-1]
     now = time.time()  # graph initialization is not allowed to make an entry late
+    if cfg.style == "active" and not p:
+        from .active_scalping import live_signal
+        histories = getattr(bridge, "_scalp_tick_history", {})
+        history = histories.setdefault(digest, [])
+        bridge._scalp_tick_history = histories
+        try:
+            fresh = bridge.tick(spec.symbol)
+            live = live_signal(bars, atr[-1], structure[-1].get("m5_bias", 0), fresh, history, time.time())
+            if live and (signal is None or now > closed_at+cfg.entry_window_seconds):
+                signal = live
+        except Blocked as error:
+            history.clear()
+            if signal is None and not entry_gate:
+                decision.update(reason=str(error), status="blocked")
     if p:
         side = 1 if p.type == bridge.api.POSITION_TYPE_BUY else -1
         if structure[-1]["structure_break"] == -side:
@@ -218,13 +265,14 @@ def scalp_cycle(bridge, model_path, memory, expected_login, calendar=None, execu
         decision.update(setup=signal, entry_score=score, learned_adjustment=adjustment,
                         score_is_probability=False)
         reason = ""
+        deadline = min(closed_at+60, signal["expires_at"]) if "expires_at" in signal else closed_at+cfg.entry_window_seconds
         last_exit = max([learned["last_exit"]] + [d.time for d in deals if d.symbol == spec.symbol
                          and d.magic == MAGIC and d.entry in (1, 3)])
         if not entries_enabled: reason = "entries_paused"
         elif positions or pending: reason = "account_has_exposure"
         elif memory.unresolved(): reason = "uncertain_order_requires_reconciliation"
         elif guard.reason(risk): reason = guard.reason(risk)
-        elif now > closed_at + cfg.entry_window_seconds: reason = "entry_window_expired"
+        elif now > deadline: reason = "entry_window_expired"
         elif np.any(np.diff(bars.time[-20:]) != 60): reason = "recent_M1_history_gap"
         elif now-last_exit < cfg.cooldown_seconds: reason = "post_trade_cooldown"
         elif learned["loss_streak"] >= cfg.max_consecutive_losses and now-learned["last_exit"] < cfg.loss_pause_seconds:
@@ -240,9 +288,13 @@ def scalp_cycle(bridge, model_path, memory, expected_login, calendar=None, execu
                 request = bridge.request(spec.symbol, signal["side"], atr[-1], spec, risk, account,
                                          structural_stop=stop)
                 entry = request["price"]
-                edge = signal["gap_high"] if signal["side"] > 0 else signal["gap_low"]
-                if abs(entry-edge) > .6*atr[-1]:
-                    raise Blocked("Price moved too far from the FVG retest")
+                if "entry_reference" in signal:
+                    if abs(entry-signal["entry_reference"]) > signal["max_entry_drift_atr"]*atr[-1]:
+                        raise Blocked("Price moved too far from the scalp signal")
+                else:
+                    edge = signal["gap_high"] if signal["side"] > 0 else signal["gap_low"]
+                    if abs(entry-edge) > .6*atr[-1]:
+                        raise Blocked("Price moved too far from the FVG retest")
                 ref = request["volume"]
                 loss = bridge.api.order_calc_profit(request["type"], spec.symbol, ref, entry, request["sl"])
                 gain = bridge.api.order_calc_profit(request["type"], spec.symbol, ref, entry, request["tp"])
@@ -260,7 +312,7 @@ def scalp_cycle(bridge, model_path, memory, expected_login, calendar=None, execu
                         {"order_key": key, "state": vector.tolist(), "risk_per_lot": risk_per_lot,
                          "created_at": now, "setup": signal})
                 result = bridge.send_order(request, key, memory, expected_login,
-                    **send_options, entry_deadline=closed_at+cfg.entry_window_seconds)
+                    **send_options, entry_deadline=deadline)
                 if result["status"] == "sent":
                     guard.entries += 1
                     memory.put_state(guard_key, asdict(guard))
@@ -268,10 +320,19 @@ def scalp_cycle(bridge, model_path, memory, expected_login, calendar=None, execu
                 decision.update(result)
             except Blocked as e:
                 reason = str(e)
+                if getattr(e, "details", None):
+                    decision["sizing"] = e.details
+                    decision["reason_code"] = e.code
         if reason:
             decision.update(action="WAIT", reason=reason, status="blocked")
     memory.put_state(decision_key, decision)
+    signature = lambda d: (d.get("action"), d.get("reason"), d.get("status"))
+    event_key = decision_key + (json.dumps(signature(decision)) if cfg.style == "active" else "")
     memory.record(scope, spec.symbol, "scalp_decision", closed_at, max(closed_at, time.time()), decision,
-                  hashlib.sha256(decision_key.encode()).hexdigest())
-    bridge.scalp_status.update(structure=structure[-1], last_decision=decision)
+                  hashlib.sha256(event_key.encode()).hexdigest())
+    stats = decision_stats(memory, scope, decision, time.time())
+    bridge.scalp_status.update(structure=structure[-1], last_decision=decision,
+                              entries_today=guard.entries, activity_stats=stats)
+    if previous_decision and signature(previous_decision) == signature(decision):
+        decision["repeat"] = True
     return decision

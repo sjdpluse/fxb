@@ -12,6 +12,7 @@ import numpy as np
 from .risk import Risk
 
 VERSION = "gold-m1-structure-v1"
+ACTIVE_VERSION = "gold-m1-active-v1"
 FEATURES = ["return_1_atr", "return_3_atr", "body_atr", "upper_wick_atr",
             "lower_wick_atr", "range_atr", "distance_swing_high_atr",
             "distance_swing_low_atr", "swing_trend", "structure_break",
@@ -23,6 +24,7 @@ READOUT_DIM = 86  # 19 engineered + 64 neural + direction + setup type + bias
 
 @dataclass(frozen=True)
 class ScalpConfig:
+    style: str = "structure"
     context_bars: int = 500
     pivot_width: int = 2
     gap_lifetime: int = 12
@@ -36,9 +38,10 @@ class ScalpConfig:
     max_weight_norm: float = .75
 
     def __post_init__(self):
-        if (self.context_bars != 500 or self.pivot_width != 2 or self.gap_lifetime != 12
-                or not 30 <= self.cooldown_seconds <= 3600
-                or not 1 <= self.entry_window_seconds <= 30
+        if (self.style not in ("structure", "active")
+                or self.context_bars != 500 or self.pivot_width != 2 or self.gap_lifetime != 12
+                or not (10 if self.style == "active" else 30) <= self.cooldown_seconds <= 3600
+                or not 1 <= self.entry_window_seconds <= (55 if self.style == "active" else 30)
                 or not 60 <= self.loss_pause_seconds <= 86400
                 or not 1 <= self.max_consecutive_losses <= 10):
             raise ValueError("Invalid M1 context, structure or timing configuration")
@@ -46,15 +49,33 @@ class ScalpConfig:
                ("context_bars", "pivot_width", "gap_lifetime", "cooldown_seconds",
                 "entry_window_seconds", "loss_pause_seconds", "max_consecutive_losses")):
             raise ValueError("Scalper counts and seconds must be integers")
-        if (not all(math.isfinite(x) for x in asdict(self).values())
+        if (not all(math.isfinite(x) for k, x in asdict(self).items() if k != "style")
                 or not .5 <= self.min_score <= .9 or not 0 < self.learning_rate <= .1
                 or not 0 < self.max_adaptation <= .2 or not 0 < self.max_weight_norm <= 1):
             raise ValueError("Online adaptation must stay within fixed bounds")
 
 
-def scalp_risk():
-    return Risk(fraction=.001, daily_loss=.01, max_drawdown=.05, max_trades=40,
-                stop_atr=1, reward_risk=1.5, max_hold_bars=5, max_spread_atr=.20,
+def scalp_config(style="structure"):
+    if style == "active":
+        return ScalpConfig(style=style, cooldown_seconds=15, entry_window_seconds=50,
+                           loss_pause_seconds=180, max_consecutive_losses=5, min_score=.55)
+    return ScalpConfig(style=style)
+
+
+def scalp_risk(style="structure", fraction=None, max_trades=None, daily_loss=None):
+    if style not in ("structure", "active"):
+        raise ValueError("Unknown scalper style")
+    active = style == "active"
+    fraction = (.005 if active else .001) if fraction is None else fraction
+    max_trades = (250 if active else 40) if max_trades is None else max_trades
+    daily_loss = (.03 if active else .01) if daily_loss is None else daily_loss
+    if (not .001 <= fraction <= .01 or type(max_trades) is not int or not 1 <= max_trades <= 250
+            or not .01 <= daily_loss <= .05
+            or (not active and (fraction, max_trades, daily_loss) != (.001, 40, .01))):
+        raise ValueError("Active limits: risk 0.1..1%, daily loss 1..5%, at most 250 entries")
+    return Risk(fraction=fraction, daily_loss=daily_loss, max_drawdown=.08 if active else .05,
+                max_trades=max_trades, stop_atr=1, reward_risk=1.5,
+                max_hold_bars=2 if active else 5, max_spread_atr=.25 if active else .20,
                 margin_fraction=.20)
 
 
@@ -142,6 +163,9 @@ def analyze(bars, config=None):
                                  "stop": anchor - side * .15 * a,
                                  "kind": "sweep_mss_fvg" if reversal else "bos_fvg_retest"})
         gap = entry_gap or (gaps[-1] if gaps else None)
+        if cfg.style == "active" and signals[i] is None and i >= 64:
+            from .active_scalping import bar_signal
+            signals[i] = bar_signal(bars, i, a, bias)
         upper, lower = float(bars.high[max(0, i-49):i+1].max()), float(bars.low[max(0, i-49):i+1].min())
         out[i] = [(c-prev)/a, (c-bars.close[max(0, i-3)])/a, (c-o)/a,
                   (h-max(c,o))/a, (min(c,o)-l)/a, (h-l)/a,
@@ -161,8 +185,9 @@ def readout_context(embedding, signal):
     embedding = np.asarray(embedding, dtype=float)
     if embedding.shape != (83,) or not np.isfinite(embedding).all():
         raise ValueError("Expected the complete 19+64 connectome readout")
-    return np.r_[np.tanh(embedding / 4), signal["side"],
-                 1 if signal["kind"] == "sweep_mss_fvg" else -1, 1.0]
+    kind = {"sweep_mss_fvg": 1., "bos_fvg_retest": -1., "momentum_breakout": .5,
+            "trend_pullback": -.5, "live_momentum_breakout": 0.}[signal["kind"]]
+    return np.r_[np.tanh(embedding / 4), signal["side"], kind, 1.0]
 
 
 def learning_state(memory, scope):

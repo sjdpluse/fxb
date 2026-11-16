@@ -1,4 +1,56 @@
-# Gold M1 scalper — 0.3.2
+# Gold M1 scalper — 0.4.0
+
+## Active deployment profile
+
+The UI offers **Active** for a new profile. Existing profiles and the CLI default
+retain **Structure** behavior. Active adds three independently identified setups:
+
+- Closed M1 momentum: body at least 0.45 ATR and 60% of range, close in the outer
+  quarter, and a break of the prior three candles by more than 0.05 ATR and no
+  more than one ATR. Candle range must not exceed 2.5 ATR.
+- Trend pullback: aligned rising/falling 5- and 13-close averages, a preceding
+  countertrend candle touching the fast average, then a directional close past
+  that candle's extremum. Body at least 0.25 ATR; range at most two ATR.
+- Live momentum: fresh bid quotes cross the preceding five closed candles'
+  extremum, followed by two distinct confirming quotes in an eight-second
+  history. Movement must exceed 0.15 ATR and twice the observed spread; extension
+  cannot exceed 0.7 ATR. Starting beyond a level, duplicate/stale ticks, and
+  a disconnected quote history cannot manufacture a crossing. The quote-based
+  signal expires after eight seconds or the next M1 boundary, whichever is first.
+
+The worker polls roughly every two seconds plus API/computation time; this is not
+a submillisecond execution engine. Neural context still advances on closed M1
+candles. Live quote checks supplement that context without treating a forming
+candle as completed. Closed-candle/FVG setups have a 50-second entry window in
+Active. An initial WAIT may be reconsidered within that minute; durable intent,
+order and account-minute claims prevent duplicate orders and uncertain retries.
+
+Active defaults: 0.5% planned equity risk per entry, 3% daily loss, 8% maximum
+drawdown, 250 maximum daily entries, one account position, 1.5 gross reward/risk,
+two-minute maximum hold, 15 seconds after an exit, and a three-minute pause after
+five consecutive losing closes. Daily counts use Asia/Kabul. The operator can
+choose 0.1..1% per-entry risk, 1..5% daily loss and 1..250 maximum entries during
+profile creation. These are limits, not minimum activity targets. Stops can slip;
+planned risk is not a guaranteed maximum realized loss. No position-size rounding
+up, martingale or artificial trades/rewards are used to meet a quota.
+
+The broker still prices stop loss and margin. An unaffordable minimum lot now
+reports its estimated loss including configured costs, its percentage of equity,
+and the chosen cash risk/margin budgets. Spread, fresh data, valid news coverage,
+net reward/risk and live activation checks remain effective. Account drawdown
+halts are visible even without a signal and are not reset by a new profile.
+The dashboard counts distinct evaluated bars, signal-bearing bars and blocked
+reasons per bar; repeated two-second polls do not inflate those counts.
+
+Select **Active** in the preparation form, review its risk limits and actual cost
+assumptions, create once, then select only the `M1-active` profile for execution.
+Each profile retains a separate learning scope; these new setup rules do not
+silently reuse an older profile's learned weights. CLI preparation also accepts
+`--style active --risk-percent 0.5 --daily-loss-percent 3 --max-trades 250` in
+addition to the symbol and mandatory cost arguments below. No claim of 100–250
+daily executed trades, measured slippage or profitability has been established.
+
+## Shared model and original Structure profile
 
 This deployment path reads **500 recent, closed M1 bid candles** from the exact
 MT5 gold symbol. It does not require the historical 20,000-bar DQN run. The

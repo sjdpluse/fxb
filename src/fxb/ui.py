@@ -146,7 +146,10 @@ def create_app(root=".", preview=False, token=None):
                 return controller.start_training(str(payload["dataset"]), int(payload.get("epochs", 10)), str(payload.get("encoder", "whole-brain")))
             if action == "scalper/prepare":
                 return controller.prepare_scalper(str(payload["symbol"]), float(payload["commission"]),
-                                                  float(payload["slippage"]), float(payload["overnight"]))
+                    float(payload["slippage"]), float(payload["overnight"]),
+                    style=str(payload.get("style", "structure")),
+                    risk_percent=payload.get("risk_percent"), max_trades=payload.get("max_trades"),
+                    daily_loss_percent=payload.get("daily_loss_percent"))
             if action == "execution/start":
                 models = payload.get("models", [])
                 if not isinstance(models, list) or any(not isinstance(p, str) for p in models):

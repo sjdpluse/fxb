@@ -1,5 +1,24 @@
 # Validation record
 
+## v0.4.0 — Active M1 entries and execution diagnostics — 2026-11-16 (Asia/Kabul)
+
+- Added opt-in per-profile Active setups: closed M1 momentum, trend pullback and
+  fresh-tick momentum across a five-bar boundary. Existing Structure profiles
+  retain their old signal/risk semantics and their separate learning scopes.
+- Fifteen new software-fixture tests cover both directions, causal prefixes,
+  quiet markets, missing minutes, observed crossings, distinct confirmations,
+  stale/disconnected quotes, rejection of chasing, expiry during preparation,
+  same-minute WAIT-to-entry, duplicate prevention, risk caps, cash diagnostics,
+  visible risk halts without a signal, bounded configuration and durable counters.
+- Local standard suite: **164 tests run, 155 passed, 9 skipped** (whole-brain,
+  Windows SDK and Chromium opt-ins). Full published-graph scalper integration:
+  **30 passed in 4.857 seconds**. Python compilation, JavaScript syntax,
+  dependency consistency and whitespace checks passed.
+- These checks use software market fixtures and the published biological graph.
+  No user-terminal order was sent. Actual daily trade frequency, broker fills,
+  live profitability and the user's hours-long runtime logs were not measured.
+  Default thresholds have not been optimized or validated as a profitable edge.
+
 ## v0.3.2 — M1 read-time freshness and automatic news calendar — 2026-11-16 (Asia/Kabul)
 
 - Reproduced a minute-boundary race: the runtime compared a newly retrieved closed bar to a clock sampled before slow account/history reads. Freshness now uses the clock after retrieval. The same change rejects data that became stale during a slow read. Strict `[0, 60)` second M1 freshness and the independent order deadline are preserved.
