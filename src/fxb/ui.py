@@ -149,7 +149,12 @@ def create_app(root=".", preview=False, token=None):
                     float(payload["slippage"]), float(payload["overnight"]),
                     style=str(payload.get("style", "structure")),
                     risk_percent=payload.get("risk_percent"), max_trades=payload.get("max_trades"),
-                    daily_loss_percent=payload.get("daily_loss_percent"))
+                    daily_loss_percent=payload.get("daily_loss_percent"),
+                    basket_orders=payload.get("basket_orders", 5), basket_lot=payload.get("basket_lot", .01),
+                    basket_risk_percent=payload.get("basket_risk_percent", 2.5))
+            if action == "execution/manual":
+                return controller.manual_order(payload["request_id"], payload["side"], payload["lot"],
+                                               payload.get("count", 1), payload.get("check_only", True))
             if action == "execution/start":
                 models = payload.get("models", [])
                 if not isinstance(models, list) or any(not isinstance(p, str) for p in models):

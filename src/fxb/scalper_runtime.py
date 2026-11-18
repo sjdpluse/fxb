@@ -13,9 +13,14 @@ from .risk import Spec, Risk, Guard
 from .mt5 import Blocked, MAGIC, NewsGate, closed_bar_status
 from .scalping import (VERSION, ACTIVE_VERSION, FEATURES, ScalpConfig, scalp_risk, analyze,
                        readout_context, entry_score, learning_state, learn_closed)
+from .micro_scalping import MicroConfig, VERSION as MICRO_VERSION
 
 
-def create_profile(bridge, symbol, output, commission, slippage, overnight, config=None, risk=None):
+def strategy_version(style):
+    return {"structure": VERSION, "active": ACTIVE_VERSION, "micro": MICRO_VERSION}[style]
+
+
+def create_profile(bridge, symbol, output, commission, slippage, overnight, config=None, risk=None, micro=None):
     """Read 500 closed M1 bars; create an untrained adaptive profile, not a DQN."""
     from .fast_brain import FastWholeBrain
     cfg = config or ScalpConfig()
@@ -36,13 +41,19 @@ def create_profile(bridge, symbol, output, commission, slippage, overnight, conf
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
     save_bars(bars, output / "context.csv")
-    meta = {"strategy": ACTIVE_VERSION if cfg.style == "active" else VERSION,
+    meta = {"strategy": strategy_version(cfg.style),
             "spec": asdict(spec), "risk": asdict(risk),
             "scalp_config": asdict(cfg), "features": FEATURES, "encoder_type": "scalp-full-brain",
             "topology": brain.provenance, "time_basis": bars.time_basis, "synthetic": False,
             "data_source": bars.source, "run_id": output.name, "created_at": time.time(),
             "context_sha256": bars.digest(), "initial_policy": "explicit_rules_with_zero_online_samples",
             "learning": "bounded_reward_readout_after_fully_closed_broker_positions"}
+    if cfg.style == "micro":
+        micro = micro or MicroConfig()
+        if micro.basket_risk > risk.daily_loss:
+            raise ValueError("Basket risk cannot exceed the daily loss limit")
+        meta["micro_config"] = asdict(micro)
+        meta["learning"] = "one_reward_per_fully_closed_autonomous_basket"
     with (output / "model.npz").open("wb") as f:
         np.savez_compressed(f, meta=np.array(json.dumps(meta, allow_nan=False)))
     return {"model": str(output / "model.npz"), "symbol": symbol, "timeframe": "M1",
@@ -60,11 +71,15 @@ def policy(bridge, path):
             meta = json.loads(str(data["meta"]))
         cfg = ScalpConfig(**meta["scalp_config"])
         risk = Risk(**meta["risk"])
-        if (meta.get("strategy") != (ACTIVE_VERSION if cfg.style == "active" else VERSION)
+        if (meta.get("strategy") != strategy_version(cfg.style)
                 or meta.get("features") != FEATURES
                 or meta["spec"]["timeframe_seconds"] != 60 or "XAU" not in meta["spec"]["symbol"].upper()
                 or risk != scalp_risk(cfg.style, risk.fraction, risk.max_trades, risk.daily_loss)):
             raise Blocked("Unsupported or changed M1 scalper profile")
+        if cfg.style == "micro":
+            micro = MicroConfig(**meta["micro_config"])
+            if micro.basket_risk > risk.daily_loss:
+                raise Blocked("Basket risk exceeds daily limit")
         brain = FastWholeBrain()
         if brain.provenance != meta["topology"]:
             raise Blocked("The scalper's connectome provenance changed; create a new profile")

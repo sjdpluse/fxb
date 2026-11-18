@@ -391,6 +391,17 @@ class FullScalperTests(unittest.TestCase):
             self.assertEqual(meta["initial_policy"],"explicit_rules_with_zero_online_samples")
             self.assertIsNone(loaded.net)
             self.assertEqual(result["orders_sent"],0)
+            from fxb.scalping import scalp_config
+            from fxb.micro_scalping import MicroConfig, VERSION as MICRO_VERSION
+            with patch.object(bridge,"spec",return_value=b.spec),patch.object(bridge,"bars",return_value=b), \
+                 patch("time.time",return_value=float(b.time[-1]+65)):
+                result=create_profile(bridge,b.spec.symbol,Path(temp)/"micro",0,0,0,
+                    scalp_config("micro"),scalp_risk("micro"),MicroConfig(10,.02,.025))
+            loaded,meta,digest=policy(bridge,result["model"])
+            self.assertEqual(meta["strategy"],MICRO_VERSION)
+            self.assertEqual(meta["micro_config"]["orders"],10)
+            self.assertEqual(meta["topology"],brain.provenance)
+            self.assertIsNone(loaded.net)
 
 
 if __name__=="__main__":unittest.main()

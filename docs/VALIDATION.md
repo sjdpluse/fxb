@@ -1,5 +1,30 @@
 # Validation record
 
+## v0.5.0 — Micro baskets and queued manual orders — 2026-11-19 (Asia/Kabul)
+
+- Added separately versioned Micro profiles with causal quote momentum, five to
+  ten fixed-volume hedging entries, whole-basket risk/margin/quota validation,
+  per-child claims, individual SL/TP and profit-protection exits. Closed-sibling
+  cash flow and broker-booked fees participate in the basket profit estimate.
+- Manual checks/sends use the same locked worker and account-scoped transport.
+  UUID deduplication, ten-second expiry and interruption records prevent replay.
+  Read-only broker checks send no orders; manual entries do not train the policy.
+- Local suite: **194 tests, 185 passed, 9 skipped**, no failures. Thirty new
+  software-fixture tests cover momentum direction/cost/staleness, hedging checks,
+  aggregate/daily/margin budgets, later rejection, partial fill, unknown entry
+  and close, restart, operator cancellation, ownership linkage, real live-mode
+  authorization guards, exactly-once rewards, external intervention, net fee
+  accounting, profit-protection exits and manual queue serialization/deduplication.
+- The opt-in published-graph M1 suite passed **30/30**, including Micro profile
+  provenance/roundtrip. Reference and compiled biological graph semantics were
+  not changed. Chromium could not launch in this local sandbox (socket denied);
+  the expanded real-browser check is included in hosted CI. Read the exact
+  release commit's Actions result for Windows/Linux/browser outcomes.
+- No native MT5 orders were sent here. Broker fixtures establish software
+  behavior, not fill quality, achieved trade frequency, win rate or profitability.
+  Native terminal execution, realized costs and profitable operation remain
+  unverified for this release. The fixed graph is not pretrained market knowledge.
+
 ## v0.4.0 — Active M1 entries and execution diagnostics — 2026-11-16 (Asia/Kabul)
 
 - Added opt-in per-profile Active setups: closed M1 momentum, trend pullback and

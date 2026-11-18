@@ -85,7 +85,7 @@ def load_weekly(path, now=None):
             return doc, True
     except (OSError, ValueError, KeyError, TypeError):
         pass
-    request = Request(SOURCE, headers={"User-Agent": "FXB/0.4.0 (+https://github.com/sjdpluse/fxb)",
+    request = Request(SOURCE, headers={"User-Agent": "FXB/0.5.0 (+https://github.com/sjdpluse/fxb)",
                                       "Accept": "application/json"})
     with urlopen(request, timeout=15) as response:
         if response.status != 200 or "json" not in response.headers.get("Content-Type", "").lower():

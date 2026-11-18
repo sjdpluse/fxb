@@ -1,8 +1,84 @@
-# Gold M1 scalper — 0.4.0
+# Gold M1 scalper — 0.5.0
+
+## Micro baskets and manual orders
+
+The new UI default is **Micro**, saved as a separate `M1-micro` profile. Old
+Active/Structure profiles keep their previous behavior and learning scopes.
+No long historical training is required: the full connectome still encodes
+500 recent closed M1 bars, and the bounded readout learns from completed trades.
+Biological weights are fixed. This release adds an explicit quote trigger around
+that context, not pretrained general market intelligence.
+
+Micro polls at 0.5 seconds **plus** MT5/API/computation latency. It keeps up to
+eight seconds of distinct bid quotes, requires at least four samples over one
+second, 60% directional imbalance and favorable recent velocity. Movement must
+exceed the greater of 0.05 ATR, three ticks, or 1.25 spreads plus configured
+round-trip commission/slippage, and must not already exceed one ATR. Duplicate,
+stale or disconnected quotes cannot build a signal. A signal expires after
+three seconds; graph warmup clears tick history and waits for a fresh signal.
+This measures quote momentum, not exchange volume/order-flow, and does not
+promise to capture every fluctuation or provide low-latency HFT execution.
+
+Choose **5..10 orders**, each **0.01 or 0.02 lot**. Multiple tickets require a
+hedging account (`ACCOUNT_MARGIN_MODE_RETAIL_HEDGING`); runtime rechecks this.
+One basket at a time is allowed. Default aggregate stop-risk allowance is 2.5%
+of equity, subject to the selected per-order limit (default 0.5%), remaining
+daily loss allowance (default 3%), persistent 8% drawdown floor, 20% margin
+budget and daily entry quota (default 250 individual orders, not 250 baskets).
+There is no silent reduction of the requested count or rounding lots upward.
+The full proposed basket must fit before the first send; each later child is
+repriced and checked against the remaining and original aggregate budgets.
+These allowances are configurable caps, not a suitability recommendation.
+Stops, slippage, gaps and delayed broker replies can still produce larger losses.
+
+Children are submitted sequentially, with a durable unique order claim each.
+Every position receives broker SL/TP. Stops use at least 0.45 M1 ATR, 4.1
+spreads and the broker minimum distance; net planned reward must cover risk
+including configured costs. A rejection, partial fill, expired signal, operator
+stop or unknown response cancels remaining children. Already-confirmed positions
+continue being managed. Unknown entries are never automatically retried; they
+do not prevent closing a separately proven position. Unknown closes cannot be
+repeated. A restart resumes management with the original profile, never the
+unsubmitted portion of a basket. IDs are linked through deal history/comments,
+not by assuming order and position ticket numbers are equal.
+
+The exit latches when estimated basket liquidation profit remains positive and
+favorable quote velocity fades below 30% of its observed peak, or more than 40%
+of protected peak profit is given back, sustained for a second on fresh samples.
+Net estimation includes closed siblings, broker-booked fees, open floating
+profit/swap, and estimated exit commission/slippage. Broker history is required
+for that profit estimate. Attached stops, maximum two-minute hold, equity halts
+and operator flatten work independently of the neural/news/history entry path.
+A basket contributes **one** learning reward after all confirmed children close,
+using actual linked net cash flow divided by recorded stop risk. Manually chosen
+orders and externally modified positions are excluded from policy learning.
+
+In **Execution**, use the new manual panel with the selected M1 worker running:
+
+1. Select BUY/SELL, 0.01/0.02 lot and count (default one; multiple requires Micro).
+2. **Check broker / no send** returns `order_check` plus total lots, planned stop
+   loss and margin. It sends zero orders and can diagnose without a news calendar.
+   Successful checking does not guarantee a subsequent order will be filled.
+3. **Send manual order** sends to the prominently displayed DEMO/LIVE account,
+   with the same account, costs, news, risk and protective-stop gates. Dry-run
+   cannot send. Live requires the existing exact-account/profile activation.
+4. The panel displays actual retcodes/comments, orders/deals, filled volumes and
+   partial/unknown/blocked results. A rejected request is not shown as a trade.
+
+Manual intents run in the same locked worker, expire after ten seconds, and are
+idempotent across repeated requests. They can be sent while automatic entries
+are paused; stop/flatten still cancels them. An in-flight operation cannot be
+recalled after the broker accepts it. Switching accounts/profiles or restarting
+never replays an unconsumed intent. Manual positions get the same exit management
+but cannot be used as an autonomous learning sample.
+
+Official protocol references: [account modes](https://www.mql5.com/en/docs/constants/environment_state/accountinformation),
+[order check](https://www.mql5.com/en/docs/python_metatrader5/mt5ordercheck_py),
+[trade return codes](https://www.mql5.com/en/docs/constants/errorswarnings/enum_trade_return_codes).
 
 ## Active deployment profile
 
-The UI offers **Active** for a new profile. Existing profiles and the CLI default
+The UI also offers **Active**. Existing profiles and the CLI default
 retain **Structure** behavior. Active adds three independently identified setups:
 
 - Closed M1 momentum: body at least 0.45 ATR and 60% of range, close in the outer

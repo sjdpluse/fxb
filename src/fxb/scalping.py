@@ -38,10 +38,10 @@ class ScalpConfig:
     max_weight_norm: float = .75
 
     def __post_init__(self):
-        if (self.style not in ("structure", "active")
+        if (self.style not in ("structure", "active", "micro")
                 or self.context_bars != 500 or self.pivot_width != 2 or self.gap_lifetime != 12
-                or not (10 if self.style == "active" else 30) <= self.cooldown_seconds <= 3600
-                or not 1 <= self.entry_window_seconds <= (55 if self.style == "active" else 30)
+                or not (10 if self.style in ("active", "micro") else 30) <= self.cooldown_seconds <= 3600
+                or not 1 <= self.entry_window_seconds <= (55 if self.style in ("active", "micro") else 30)
                 or not 60 <= self.loss_pause_seconds <= 86400
                 or not 1 <= self.max_consecutive_losses <= 10):
             raise ValueError("Invalid M1 context, structure or timing configuration")
@@ -56,6 +56,9 @@ class ScalpConfig:
 
 
 def scalp_config(style="structure"):
+    if style == "micro":
+        return ScalpConfig(style=style, cooldown_seconds=10, entry_window_seconds=3,
+                           loss_pause_seconds=180, max_consecutive_losses=5, min_score=.55)
     if style == "active":
         return ScalpConfig(style=style, cooldown_seconds=15, entry_window_seconds=50,
                            loss_pause_seconds=180, max_consecutive_losses=5, min_score=.55)
@@ -63,9 +66,9 @@ def scalp_config(style="structure"):
 
 
 def scalp_risk(style="structure", fraction=None, max_trades=None, daily_loss=None):
-    if style not in ("structure", "active"):
+    if style not in ("structure", "active", "micro"):
         raise ValueError("Unknown scalper style")
-    active = style == "active"
+    active = style in ("active", "micro")
     fraction = (.005 if active else .001) if fraction is None else fraction
     max_trades = (250 if active else 40) if max_trades is None else max_trades
     daily_loss = (.03 if active else .01) if daily_loss is None else daily_loss
@@ -186,7 +189,7 @@ def readout_context(embedding, signal):
     if embedding.shape != (83,) or not np.isfinite(embedding).all():
         raise ValueError("Expected the complete 19+64 connectome readout")
     kind = {"sweep_mss_fvg": 1., "bos_fvg_retest": -1., "momentum_breakout": .5,
-            "trend_pullback": -.5, "live_momentum_breakout": 0.}[signal["kind"]]
+            "trend_pullback": -.5, "live_momentum_breakout": 0., "micro_momentum": .25}[signal["kind"]]
     return np.r_[np.tanh(embedding / 4), signal["side"], kind, 1.0]
 
 

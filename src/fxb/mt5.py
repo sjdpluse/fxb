@@ -310,7 +310,7 @@ class MT5:
             return self.api.ORDER_FILLING_RETURN
         raise Blocked("No supported market-order filling policy")
 
-    def request(self, symbol, side, atr, spec, risk, account, now=None, structural_stop=None):
+    def request(self, symbol, side, atr, spec, risk, account, now=None, structural_stop=None, fixed_volume=None):
         info, tick = self.symbol(symbol), self.tick(symbol, now)
         if info.trade_mode != self.api.SYMBOL_TRADE_MODE_FULL:
             raise Blocked("Symbol does not permit full trading")
@@ -348,6 +348,18 @@ class MT5:
             raise Blocked("Broker could not price stop-loss risk")
         loss_per_lot = -loss / ref + 2 * spec.commission_per_lot_side
         lots = size_lots(account.equity, loss_per_lot, account.margin_free, margin / ref, active_spec, risk)
+        if fixed_volume is not None:
+            from .risk import floor_lots
+            if (type(fixed_volume) not in (int, float) or not math.isfinite(fixed_volume)
+                    or not math.isclose(floor_lots(fixed_volume, spec.lot_min, spec.lot_max, spec.lot_step),
+                                        fixed_volume, abs_tol=1e-9) or fixed_volume <= 0):
+                raise Blocked("Requested fixed volume violates the broker lot limits")
+            if fixed_volume > lots + 1e-9:
+                raise Blocked("Requested lot exceeds the per-order risk or margin budget", code="fixed_lot_budget",
+                    details={"requested_lot": fixed_volume, "risk_cash": fixed_volume*loss_per_lot,
+                             "risk_budget_cash": account.equity*risk.fraction,
+                             "margin_cash": fixed_volume*margin/ref, "currency": account.currency})
+            lots = fixed_volume
         if not lots:
             raise Blocked("Minimum lot would exceed risk or margin budget", code="minimum_lot_budget",
                 details={"currency": account.currency, "minimum_lot": spec.lot_min,
@@ -372,7 +384,7 @@ class MT5:
 
     def send_order(self, request, key, memory, expected_login, execute=False, mode="demo",
                    expected_server=None, authorization=None, model_hash=None, risk_config=None,
-                   entry_period_seconds=300, entry_deadline=None):
+                   entry_period_seconds=300, entry_deadline=None, basket_id=None):
         if entry_period_seconds not in (60, 300):
             raise Blocked("Unsupported entry interval")
         account = self.account(expected_login, execution_mode=mode, expected_server=expected_server)
@@ -391,7 +403,10 @@ class MT5:
             if len(own) != 1 or request["volume"] > own[0].volume:
                 raise Blocked("Closing request does not match an owned position")
         else:
-            if positions or orders:
+            if basket_id is not None:
+                from .basket_runtime import validate_child
+                validate_child(self, memory, basket_id, key, request, account, positions, orders, model_hash)
+            elif positions or orders:
                 raise Blocked("Account already has exposure or pending orders")
             buy = request["type"] == self.api.ORDER_TYPE_BUY
             entry, stop, target = request["price"], request.get("sl", 0), request.get("tp", 0)
@@ -399,18 +414,28 @@ class MT5:
                 raise Blocked("Opening orders require valid broker-side SL and TP")
             slot = (f"entry-slot:{expected_login}:{int(time.time() // 300)}" if entry_period_seconds == 300 else
                     f"entry-slot-m1:{expected_login}:{int(time.time() // 60)}")
+            if basket_id is not None:
+                slot = "basket-slot:" + basket_id + ":" + key
             if execute and memory.get_state(slot) not in (None, key):
                 raise Blocked("Another policy already reserved this account's entry for the current bar")
             if entry_deadline is not None and time.time() > entry_deadline:
                 raise Blocked("Scalp entry window expired")
         if not execute:
             return {"status": "dry_run", "request": request}
-        if memory.unresolved():
+        unresolved = memory.unresolved()
+        if "position" in request:
+            # An uncertain entry must not prevent reducing a proven position.
+            # An uncertain CLOSE, however, must never be sent a second time.
+            unresolved = [row for row in unresolved if
+                (json.loads(row["payload"]).get("request", json.loads(row["payload"]))).get("position") == request["position"]]
+        if unresolved:
             raise Blocked("Uncertain previous order exists; reconcile it in MT5 before continuing")
         request = request | {"comment": "fxb-" + hashlib.sha256(key.encode()).hexdigest()[:20]}
         check = self.api.order_check(request)
         if check is None or check.retcode != 0:
-            raise Blocked("Broker order_check rejected the request")
+            details = {"retcode": getattr(check, "retcode", None), "comment": getattr(check, "comment", "No response")}
+            raise Blocked(f"Broker order_check rejected: {details['retcode']} {details['comment']}",
+                          code="order_check", details=details)
         if not memory.claim_order(key, request):
             return {"status": "duplicate_blocked"}
         if "position" not in request:
@@ -442,10 +467,17 @@ class MT5:
             raise Blocked("MT5 returned no order result; reconcile before restarting")
         if result.retcode not in (self.api.TRADE_RETCODE_DONE, self.api.TRADE_RETCODE_DONE_PARTIAL):
             # Even a server timeout or PLACED response is ambiguous: never send again.
-            memory.order_status(key, "ambiguous", {"request": request, "retcode": result.retcode})
-            raise Blocked(f"Unconfirmed MT5 result {result.retcode}; reconcile before restarting")
+            details = {"request": request, "retcode": result.retcode, "comment": getattr(result, "comment", "")}
+            # Only explicit, documented no-execution responses are rejected.
+            rejected = result.retcode in (10004, 10006, 10007, 10013, 10014, 10015, 10016,
+                10017, 10018, 10019, 10020, 10021, 10022, 10024, 10026, 10027, 10030,
+                10032, 10033, 10034, 10035)
+            memory.order_status(key, "rejected" if rejected else "ambiguous", details)
+            raise Blocked(f"MT5 {'rejected' if rejected else 'unconfirmed'}: {result.retcode} {details['comment']}",
+                          code="order_send", details=details)
         payload = {"request": request, "retcode": result.retcode, "order": result.order,
-                   "deal": result.deal, "volume": result.volume, "price": result.price}
+                   "deal": result.deal, "volume": result.volume, "price": result.price,
+                   "comment": getattr(result, "comment", "")}
         memory.order_status(key, "sent", payload)
         return {"status": "sent", **payload}
 

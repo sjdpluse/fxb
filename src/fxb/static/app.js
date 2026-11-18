@@ -52,17 +52,24 @@ function render(s){
   const checks=[['کانکتوم کامل',!!manifest,manifest?'138,639 neurons · full graph':'نصب از تنظیمات'],['ترمینال معاملاتی',s.connected,s.connected?`${a.login} / ${a.mode}`:'Windows MT5 required'],['مدل با دادهٔ واقعی',s.models.some(m=>!m.synthetic),`${s.models.filter(m=>!m.synthetic).length} profiles`],['تقویم ورود',s.news.ready,s.news.ready?'Fresh coverage':'نیاز به تقویم معتبر']];
   $('readiness').innerHTML=checks.map(([name,ok,detail])=>`<div>${esc(name)}<b class="${ok?'ok':''}">${ok?'READY':'PENDING'}</b><small>${esc(detail)}</small></div>`).join('');
   const modelKey=JSON.stringify(s.models);if(modelKey!==oldModels){oldModels=modelKey;const checked=new Set([...document.querySelectorAll('[name=models]:checked')].map(el=>el.value));$('models-table').innerHTML=table(['MODEL / SYMBOL','ENCODER','SOURCE','TRADES','WIN RATE','RETURN','MAX DD','PROFIT FACTOR'],s.models.map(m=>{const h=m.holdout||{};return[esc(m.name)+'<br>'+esc(m.symbol),esc(m.encoder),`<span class="badge ${m.synthetic?'amber':'green'}">${m.synthetic?'SYNTHETIC':m.strategy?'ONLINE · NO HOLDOUT':'MARKET DATA'}</span>`,num(h.trades),h.win_rate==null?'—':num(h.win_rate*100,1)+'%',h.return_pct==null?'—':num(h.return_pct,2)+'%',h.max_drawdown_pct==null?'—':num(h.max_drawdown_pct,2)+'%',num(h.profit_factor,2)];}),'هنوز مدلی آموزش داده نشده است. نتایج پس از آموزش نمایش داده می‌شوند.');
-    $('model-choices').innerHTML=s.models.length?s.models.map(m=>`<label class="model-choice"><input type="checkbox" name="models" value="${esc(m.path)}" ${checked.has(m.path)?'checked':''}><span>${esc(m.symbol)} / ${esc(m.name)}<small>${esc(m.encoder)} · ${m.synthetic?'SYNTHETIC — dry run only':m.strategy?`M1 ${m.scalp_style==='active'?'ACTIVE':'STRUCTURE'} · ${num(m.risk.fraction*100,2)}% risk · ${num(m.risk.max_trades)}/day`:'REAL MARKET DATA'}</small></span></label>`).join(''):'مدل آموزش‌دیده‌ای موجود نیست.';}
+    $('model-choices').innerHTML=s.models.length?s.models.map(m=>`<label class="model-choice"><input type="checkbox" name="models" value="${esc(m.path)}" ${checked.has(m.path)?'checked':''}><span>${esc(m.symbol)} / ${esc(m.name)}<small>${esc(m.encoder)} · ${m.synthetic?'SYNTHETIC — dry run only':m.strategy?`M1 ${(m.scalp_style||'structure').toUpperCase()} · ${num(m.risk.fraction*100,2)}% risk · ${num(m.risk.max_trades)}/day`:'REAL MARKET DATA'}</small></span></label>`).join(''):'مدل آموزش‌دیده‌ای موجود نیست.';}
   const scalp=s.scalper;
   if(scalp){const l=scalp.learning||{},t=scalp.structure||{},d=scalp.last_decision||{},r=scalp.risk||{},stats=scalp.activity_stats||{};
     $('scalp-status').className='pad';$('scalp-status').innerHTML=table(['SYMBOL','SWING HIGH / LOW','M5 BIAS','LEARNED TRADES','REALIZED NET','LAST DECISION'],[[esc(scalp.symbol),num(t.swing_high,2)+' / '+num(t.swing_low,2),esc(t.m5_bias??'—'),num(l.samples),num(l.net_cashflow,2)+' '+esc(a?.currency||''),esc(d.action||'WAIT')+' · '+esc(scalpReason(d.reason_code||d.reason))]],'');
-    $('scalp-limits').textContent=`${scalp.style==='active'?'ACTIVE':'STRUCTURE'} · ریسک هر معامله ${num(r.fraction*100,2)}٪ (${num(scalp.risk_budget_cash,2)} ${a?.currency||''}) · حد زیان روزانه ${num(r.daily_loss*100,1)}٪ · ورود امروز ${num(scalp.entries_today)} / ${num(r.max_trades)} · یک موقعیت هم‌زمان · امتیاز ورود احتمال برد نیست.`;
+    $('scalp-limits').textContent=`${(scalp.style||'structure').toUpperCase()} · ریسک هر معامله ${num(r.fraction*100,2)}٪ (${num(scalp.risk_budget_cash,2)} ${a?.currency||''}) · حد زیان روزانه ${num(r.daily_loss*100,1)}٪ · ورود امروز ${num(scalp.entries_today)} / ${num(r.max_trades)} · ${scalp.style==='micro'?`یک سبد هم‌زمان · ${num(scalp.micro_config?.orders)} × ${num(scalp.micro_config?.lot,2)} لات · ریسک کل سبد ${num((scalp.micro_config?.basket_risk||0)*100,2)}٪`:'یک موقعیت هم‌زمان'} · امتیاز ورود احتمال برد نیست.`;
     const reasons=Object.entries(stats.reasons||{}).sort((x,y)=>y[1]-x[1]).slice(0,5).map(([why,count])=>`${scalpReason(why)}: ${num(count)}`).join(' · ');
     let detail=`کندل‌های بررسی‌شدهٔ امروز: ${num(stats.bars||0)} · کندل‌های دارای فرصت: ${num(stats.signal_bars||0)}. ${reasons}`;
     if(scalp.entry_gate)detail+=` | مانع فعلی ورود: ${scalpReason(scalp.entry_gate)}. سقف سرمایهٔ ثبت‌شده ${num(scalp.risk_peak_equity,2)} و سرمایهٔ ابتدای روز ${num(scalp.day_start_equity,2)} ${a?.currency||''}.`;
-    if(d.sizing){const z=d.sizing;detail+=` | حداقل لات ${num(z.minimum_lot,2)}: زیان محاسبه‌شده تا حد ضرر و هزینه‌ها ${num(z.minimum_lot_risk_cash,2)} ${z.currency} (${num(z.minimum_lot_risk_percent,2)}٪ سرمایه)، بودجهٔ انتخاب‌شده ${num(z.risk_budget_cash,2)} ${z.currency}. مارجین لازم ${num(z.minimum_lot_margin_cash,2)} / بودجهٔ مارجین ${num(z.margin_budget_cash,2)} ${z.currency}.`;}
-    $('scalp-diagnostics').textContent=detail;
+    if(d.sizing&&d.sizing.minimum_lot!=null){const z=d.sizing;detail+=` | حداقل لات ${num(z.minimum_lot,2)}: زیان محاسبه‌شده تا حد ضرر و هزینه‌ها ${num(z.minimum_lot_risk_cash,2)} ${z.currency} (${num(z.minimum_lot_risk_percent,2)}٪ سرمایه)، بودجهٔ انتخاب‌شده ${num(z.risk_budget_cash,2)} ${z.currency}. مارجین لازم ${num(z.minimum_lot_margin_cash,2)} / بودجهٔ مارجین ${num(z.margin_budget_cash,2)} ${z.currency}.`;}
+    if(scalp.style==='micro'){detail+=` | فشار تیک: ${num(scalp.pressure?.velocity,3)} / ثانیه · پوزیشن‌های سبد: ${num(d.open_positions)} · خالص تخمینی خروج: ${num(d.estimated_liquidation_net,2)} ${a?.currency||''}`;} if(d.details)detail+=' | '+JSON.stringify(d.details); if(d.error)detail+=' | '+JSON.stringify(d.error); $('scalp-diagnostics').textContent=detail;
   }else{$('scalp-limits').textContent='حدود ریسک از پروفایل فعال خوانده می‌شود.';$('scalp-diagnostics').textContent='';}
+  const manual=s.manual_order, pending=manual&&['queued','processing'].includes(manual.status);
+  const m1=s.active_models.length===1&&s.models.some(m=>m.path===s.active_models[0]&&m.strategy);
+  $('manual-mode').textContent=s.running?`${s.mode.toUpperCase()} · #${a?.login||''}`:'STOPPED';
+  $('manual-check').disabled=manualBusy||pending||!s.running||!m1||s.preview;
+  $('manual-send').disabled=$('manual-check').disabled||s.mode==='dry-run';
+  $('manual-summary').textContent=`حساب ${a?.login||'—'} · ${s.mode.toUpperCase()} · حجم کل انتخاب‌شده ${(Number($('manual-form').elements.lot.value)*Number($('manual-form').elements.count.value)).toFixed(2)} لات. بررسی، سفارش باز نمی‌کند؛ ارسال دستی سفارش واقعی به همین حساب می‌فرستد.`;
+  if(manual)$('manual-result').textContent=JSON.stringify(manual,null,2);
   const market=scalp?.market_data;
   $('market-data-status').textContent=market?`دادهٔ M1: ${market.status} · بسته‌شدن: ${new Date(market.bar_close_utc).toLocaleString('en-GB',{timeZone:'Asia/Kabul',hour12:false})} کابل · سن هنگام بررسی: ${num(market.age_seconds,2)} ثانیه`:'در انتظار دریافت کندل M1.';
   const sf=$('scalp-form');
@@ -88,8 +95,8 @@ function formHandler(id,handler){$(id).addEventListener('submit',async e=>{e.pre
 formHandler('stimulate-form',d=>command('brain/stimulate',{channels:d.channels,frames:Number(d.frames),rate:Number(d.rate)}));
 formHandler('connect-form',async d=>{await command('account/configure',{login:Number(d.login),server:d.server.trim(),terminal:d.terminal.trim(),broker_clock:{zone:d.broker_zone.trim()||'UTC',valid_from:d.clock_from.trim()||null,valid_until:d.clock_until.trim()||null}});await command('account/connect');});
 formHandler('export-form',d=>command('data/export',{symbol:d.symbol.trim(),bars:Number(d.bars),commission:Number(d.commission),slippage:Number(d.slippage),overnight:Number(d.overnight)}));
-formHandler('scalp-form',d=>command('scalper/prepare',{symbol:d.symbol.trim(),commission:Number(d.commission),slippage:Number(d.slippage),overnight:Number(d.overnight),style:d.style,...(d.style==='active'?{risk_percent:Number(d.risk_percent),max_trades:Number(d.max_trades),daily_loss_percent:Number(d.daily_loss_percent)}:{})}));
-$('scalp-style').addEventListener('change',()=>{for(const name of ['risk_percent','max_trades','daily_loss_percent'])$('scalp-form').elements[name].disabled=$('scalp-style').value!=='active';});
+formHandler('scalp-form',d=>command('scalper/prepare',{symbol:d.symbol.trim(),commission:Number(d.commission),slippage:Number(d.slippage),overnight:Number(d.overnight),style:d.style,...(d.style!=='structure'?{risk_percent:Number(d.risk_percent),max_trades:Number(d.max_trades),daily_loss_percent:Number(d.daily_loss_percent)}:{}),...(d.style==='micro'?{basket_orders:Number(d.basket_orders),basket_lot:Number(d.basket_lot),basket_risk_percent:Number(d.basket_risk_percent)}:{})}));
+function scalpFields(){const style=$('scalp-style').value;for(const name of ['risk_percent','max_trades','daily_loss_percent'])$('scalp-form').elements[name].disabled=style==='structure';$('micro-fields').hidden=style!=='micro';for(const name of ['basket_orders','basket_lot','basket_risk_percent'])$('scalp-form').elements[name].disabled=style!=='micro';} $('scalp-style').addEventListener('change',scalpFields);scalpFields();
 formHandler('train-form',d=>command('training/start',{dataset:d.dataset,epochs:Number(d.epochs),encoder:d.encoder}));
 formHandler('start-form',d=>command('execution/start',{models:[...document.querySelectorAll('[name=models]:checked')].map(el=>el.value),mode:d.mode,hours:Number(d.hours||8),acknowledged_login:d.acknowledged_login?Number(d.acknowledged_login):null}));
 $('mode-select').addEventListener('change',()=>{$('live-fields').hidden=$('mode-select').value!=='live';});
@@ -124,3 +131,18 @@ $('orbit').addEventListener('click',()=>{if(brain){brain.rotating=!brain.rotatin
 $('reset-view').addEventListener('click',()=>{if(brain){brain.yaw=.13;brain.pitch=-.15;brain.zoom=1;}});
 $('fit-view').addEventListener('click',async()=>{try{if(document.fullscreenElement)await document.exitFullscreen();else await document.querySelector('.brain-stage').requestFullscreen();}catch(e){toast(e.message,true);}});
 function clock(){$('clock').textContent=new Date().toLocaleTimeString('en-GB',{timeZone:'Asia/Kabul',hour12:false})+' KABUL';}clock();setInterval(clock,1000);poll();setInterval(poll,1500);
+
+let manualBusy=false, manualRetry=null;
+async function manualRequest(checkOnly){
+  if(manualBusy)return;
+  manualBusy=true;$('manual-check').disabled=true;$('manual-send').disabled=true;
+  const f=$('manual-form').elements;
+  const payload={side:Number(f.side.value),lot:Number(f.lot.value),count:Number(f.count.value),check_only:checkOnly};
+  const signature=JSON.stringify(payload);
+  if(!manualRetry||manualRetry.signature!==signature)manualRetry={signature,id:crypto.randomUUID()};
+  try{const r=await api('execution/manual',{...payload,request_id:manualRetry.id});$('manual-result').textContent=JSON.stringify(r,null,2);manualRetry=null;await poll();}
+  catch(e){$('manual-result').textContent=e.message+' · Repeating the same request retains its ID.';toast(e.message,true);}
+  finally{manualBusy=false;await poll();}
+}
+$('manual-check').addEventListener('click',()=>manualRequest(true));
+$('manual-form').addEventListener('submit',e=>{e.preventDefault();manualRequest(false);});
