@@ -32,7 +32,8 @@ These allowances are configurable caps, not a suitability recommendation.
 Stops, slippage, gaps and delayed broker replies can still produce larger losses.
 
 Children are submitted sequentially, with a durable unique order claim each.
-Every position receives broker SL/TP. Stops use at least 0.45 M1 ATR, 4.1
+Every position receives broker SL/TP. Only FOK/IOC filling is supported for
+baskets; RETURN is rejected because an unfilled remainder could stay pending. Stops use at least 0.45 M1 ATR, 4.1
 spreads and the broker minimum distance; net planned reward must cover risk
 including configured costs. A rejection, partial fill, expired signal, operator
 stop or unknown response cancels remaining children. Already-confirmed positions

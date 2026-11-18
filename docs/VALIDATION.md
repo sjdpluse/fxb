@@ -9,12 +9,14 @@
 - Manual checks/sends use the same locked worker and account-scoped transport.
   UUID deduplication, ten-second expiry and interruption records prevent replay.
   Read-only broker checks send no orders; manual entries do not train the policy.
-- Local suite: **194 tests, 185 passed, 9 skipped**, no failures. Thirty new
+- Local suite: **196 tests, 187 passed, 9 skipped**, no failures. Thirty-two new
   software-fixture tests cover momentum direction/cost/staleness, hedging checks,
   aggregate/daily/margin budgets, later rejection, partial fill, unknown entry
   and close, restart, operator cancellation, ownership linkage, real live-mode
   authorization guards, exactly-once rewards, external intervention, net fee
   accounting, profit-protection exits and manual queue serialization/deduplication.
+  Durable receipts restore exact partial-fill risk after a crash; non-immediate
+  RETURN fills are rejected so a residual order cannot stay pending.
 - The opt-in published-graph M1 suite passed **30/30**, including Micro profile
   provenance/roundtrip. Reference and compiled biological graph semantics were
   not changed. Chromium could not launch in this local sandbox (socket denied);

@@ -229,6 +229,27 @@ class BasketTests(unittest.TestCase):
         self.assertEqual(self.api.open_positions,[])
         self.assertEqual(learning_state(self.m,self.scope)['samples'],1)
 
+    def test_partial_receipt_restores_risk_after_crash_before_basket_write(self):
+        self.api.partial_at=2
+        self.send()
+        group=self.group()
+        expected=sum(c.get('risk_cash',0.) for c in group['children'])
+        for child in group['children']:
+            child.pop('risk_cash',None);child.pop('margin_cash',None)
+        self.m.put_state('basket:'+group['id'],group)
+        refresh_group(self.bridge,self.m,group,self.bridge.positions()[0],self.now)
+        self.assertAlmostEqual(sum(c.get('risk_cash',0.) for c in group['children']),expected)
+        self.close_and_settle()
+        events=[e for e in self.m.recent_events() if e['kind']=='scalp_reward']
+        self.assertEqual(len(events),1)
+        self.assertAlmostEqual(events[0]['payload']['risk_cash'],expected)
+
+    def test_return_filling_policy_cannot_leave_an_unfilled_remainder(self):
+        self.api.info.filling_mode=0
+        self.api.info.trade_exemode=0
+        with self.assertRaisesRegex(Blocked,'FOK or IOC'):self.send()
+        self.assertEqual(self.api.calls,0)
+
     def test_operator_cancellation_between_children_and_deadline(self):
         self.api.after_send=lambda:setattr(self,'now',self.now+4)
         self.assertEqual(self.send()['orders_sent'],1)

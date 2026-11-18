@@ -69,6 +69,8 @@ def request_plan(bridge, account, guard, spec, risk, side, atr, lot, count, frac
     entry = tick.ask if side > 0 else tick.bid
     request = bridge.request(spec.symbol, side, atr, spec, risk, account,
                              structural_stop=entry-side*distance, fixed_volume=lot)
+    if request["type_filling"] not in (bridge.api.ORDER_FILLING_FOK, bridge.api.ORDER_FILLING_IOC):
+        raise Blocked("Baskets require FOK or IOC; unfilled volume must not remain pending")
     loss, gain, margin = order_cost(bridge, request, spec)
     if gain < loss:
         raise Blocked("Scalp target does not cover stop risk after configured costs")
@@ -111,6 +113,11 @@ def refresh_group(bridge, memory, group, positions, now):
             child["position_id"] = next(iter(ids))
         if status == "sent":
             child["result"] = sent
+            if "risk_cash" not in child:
+                # Recover the exact filled volume/price if the process died
+                # after the durable receipt but before the basket state write.
+                filled = child["request"] | {"volume": sent["volume"], "price": sent["price"]}
+                child["risk_cash"], _, child["margin_cash"] = order_cost(bridge, filled, Spec(**group["spec"]))
     ids = {c.get("position_id") for c in group["children"]} - {None}
     own = [p for p in positions if getattr(p, "identifier", p.ticket) in ids
            and p.magic == MAGIC and p.symbol == group["symbol"]]
