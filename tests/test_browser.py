@@ -14,7 +14,7 @@ import urllib.request
 @unittest.skipUnless(os.environ.get("FXB_BROWSER_TESTS")=="1", "opt-in Chromium UI test")
 class BrowserTests(unittest.TestCase):
     def test_m1_controls_render_without_javascript_errors(self):
-        from playwright.sync_api import sync_playwright
+        from playwright.sync_api import sync_playwright, expect
         with tempfile.TemporaryDirectory() as temp, socket.socket() as sock:
             sock.bind(("127.0.0.1",0));port=sock.getsockname()[1];sock.close()
             with (Path(temp)/"server.log").open("w") as log:
@@ -62,14 +62,14 @@ class BrowserTests(unittest.TestCase):
                         status['worker']={'phase':'blocked','reason':'Another FXB worker holds the execution lock'}
                         page.route('**/api/status',lambda route:route.fulfill(status=200,content_type='application/json',body=json.dumps(status)))
                         page.locator('[data-page="execution"]').click()
-                        page.wait_for_function("document.getElementById('engine-state').textContent === 'BLOCKED'")
+                        expect(page.locator("#engine-state")).to_have_text("BLOCKED")
                         self.assertIn('Another FXB worker',page.locator('#engine-detail').text_content())
                         status['running']=True;status['entries_enabled']=True
                         status['worker']={'phase':'waiting','reason':'neural_warmup'}
                         status['brain']['activity']['execution']={'phase':'warming_up','remaining_bars':60,'reason':'neural_warmup'}
                         status['manual_order']={'status':'blocked','reason_code':'basket_budget','details':{'total_risk_cash':10,'risk_budget_cash':5}}
-                        page.wait_for_function("document.getElementById('engine-state').textContent === 'WARMUP'")
-                        page.wait_for_function("document.getElementById('activity-source').textContent.includes('60')")
+                        expect(page.locator("#engine-state")).to_have_text("WARMUP")
+                        expect(page.locator("#activity-source")).to_contain_text("60")
                         self.assertIn('BLOCKED',page.locator('#manual-status').text_content())
                         self.assertIn('total_risk_cash',page.locator('#manual-result').text_content())
                         self.assertEqual(errors,[])
