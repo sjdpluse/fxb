@@ -7,6 +7,7 @@ const scalpReason = value => scalpReasons[value] || value || '—';
 const hash = new URLSearchParams(location.hash.slice(1));
 if (hash.has('token')) { sessionStorage.setItem('fxb_token', hash.get('token')); history.replaceState(null, '', location.pathname); }
 const token = sessionStorage.getItem('fxb_token') || '';
+let demoReview=null, demoBusy=false;
 let snapshot, currentPage = 'overview', initializedConfig = false, oldModels = '', oldDatasets = '', geometryLoaded = false, geometryLoading = false, lastJob = '', toastTimer;
 const pageInfo = {
   overview:['OVERVIEW','مرکز فرماندهی معاملات','فعالیت مغز، وضعیت سرمایه و تصمیم‌های سیستم در یک محیط.'],
@@ -36,6 +37,13 @@ function render(s){
   $('connection').textContent=s.connected?`MT5 · ${s.account?.mode?.toUpperCase()||'CONNECTED'}`:'MT5 DISCONNECTED';$('connection').className='badge '+(s.connected?'green':'');
   const a=s.account;['equity','balance','profit'].forEach(k=>$(k).textContent=a?num(a[k],2):'—');$('profit').className=a?(a.profit>=0?'positive':'negative'):'';
   $('account-label').textContent=a?`#${a.login} · ${a.server}`:'حساب متصل نشده';$('currency').textContent=a?`${a.currency} · updated ${kabTime(a.updated_at)} Kabul`:'دادهٔ مستقیم ترمینال';
+  const demoEligible=!s.preview&&s.connected&&a?.mode==='demo';
+  $('demo-session-panel').hidden=!demoEligible;
+  const demoUnavailable=!demoEligible||s.running||s.job.status==='running'||demoBusy;
+  $('demo-session-preview').disabled=demoUnavailable;
+  if(demoReview&&(!demoEligible||a.login!==demoReview.login||a.server!==demoReview.server||a.equity!==demoReview.equity||a.balance!==demoReview.balance)){demoReview=null;$('demo-session-note').textContent='حساب یا سرمایه تغییر کرد؛ بررسی تازه بگیرید.';}
+  $('demo-session-review').hidden=!demoReview;
+  $('demo-session-restart').disabled=demoUnavailable||!demoReview;
   const worker=s.worker||{}, neural=s.brain.activity.execution||{};
   const initializing=neural.phase==='warming_up'&&neural.remaining_bars==null;
   const enginePhase=worker.phase==='failed'?'FAILED':worker.phase==='blocked'?'BLOCKED':!s.running?'STANDBY':worker.phase==='stopping'?'STOPPING':!s.entries_enabled?'PAUSED':neural.phase==='warming_up'?(initializing?'INITIALIZING':'WARMUP'):worker.phase==='starting'?'STARTING':worker.phase==='waiting'?'WAITING':'RUNNING';
@@ -82,6 +90,8 @@ function render(s){
   $('manual-summary').textContent=`حساب ${a?.login||'—'} · ${s.mode.toUpperCase()} · حجم کل انتخاب‌شده ${(Number($('manual-form').elements.lot.value)*Number($('manual-form').elements.count.value)).toFixed(2)} لات. بررسی، سفارش باز نمی‌کند؛ ارسال دستی سفارش واقعی به همین حساب می‌فرستد.`;
   if(manual)$('manual-result').textContent=JSON.stringify(manual,null,2);
   $('manual-status').textContent=manual?`${manual.status.toUpperCase()} · ${scalpReason(manual.reason_code||manual.error?.code||manual.error?.reason||manual.reason||'')}${manual.broker?' · MT5 '+manual.broker.retcode+' · '+manual.broker.comment:''}`:'بررسی اتصال: ابتدا یک سفارش ۰٫۰۱ لات را با «بررسی بدون ارسال» بررسی کنید.';
+  if(manual?.reason_code==='fixed_lot_budget'&&manual.details){const z=manual.details;$('manual-status').textContent+=` | ریسک سفارش ${num(z.risk_cash,2)} / بودجه ${num(z.risk_budget_cash,2)} ${z.currency}.`;if(z.minimum_equity_for_selected_risk!=null)$('manual-status').textContent+=` ریسک کل انتخاب‌شده ${num(z.total_risk_cash,2)}؛ حداقل سرمایهٔ محاسباتی با همین حدود ${num(z.minimum_equity_for_selected_risk,2)} ${z.currency}، با فرض رفع توقف‌های قبلی. این برآورد با قیمت تغییر می‌کند.`;}
+
   const market=scalp?.market_data;
   $('market-data-status').textContent=market?`دادهٔ M1: ${market.status} · بسته‌شدن: ${new Date(market.bar_close_utc).toLocaleString('en-GB',{timeZone:'Asia/Kabul',hour12:false})} کابل · سن هنگام بررسی: ${num(market.age_seconds,2)} ثانیه`:'در انتظار دریافت کندل M1.';
   const sf=$('scalp-form');
@@ -158,3 +168,28 @@ async function manualRequest(checkOnly){
 }
 $('manual-check').addEventListener('click',()=>manualRequest(true));
 $('manual-form').addEventListener('submit',e=>{e.preventDefault();manualRequest(false);});
+
+$('demo-session-preview').addEventListener('click',async()=>{
+  demoBusy=true;$('demo-session-preview').disabled=true;
+  try{
+    demoReview=await api('execution/demo-session/preview',{});
+    const r=demoReview,b=r.previous,n=r.proposed;
+    $('demo-session-account').textContent=`حساب دمو #${r.login} · ${r.server} · موجودی ${num(r.balance,2)} ${r.currency} · سرمایه ${num(r.equity,2)} ${r.currency}`;
+    $('demo-session-values').innerHTML=table(['مبنا','قبلی','دورهٔ جدید'],[
+      ['سقف سرمایه',num(b.peak||0,2),num(n.peak,2)],['سرمایهٔ ابتدای دوره',num(b.day_start||0,2),num(n.day_start,2)],['ورود امروز',num(b.entries||0),num(n.entries)]],'');
+    $('demo-session-restart').textContent=`ثبت مبنای ${num(r.equity,2)} ${r.currency} برای حساب #${r.login}`;
+    $('demo-session-note').textContent='مقادیر را بررسی کنید؛ تأیید تا دو دقیقه معتبر است. این کار مجوز عبور از بودجهٔ حجم یا ریسک نیست.';
+  }catch(e){toast(e.message,true);$('demo-session-note').textContent=e.message;}
+  finally{demoBusy=false;await poll();}
+});
+$('demo-session-restart').addEventListener('click',async()=>{
+  if(!demoReview||demoBusy)return;
+  demoBusy=true;$('demo-session-restart').disabled=true;
+  try{
+    const r=await api('execution/demo-session/restart',{token:demoReview.token,acknowledged_login:demoReview.login});
+    demoReview=null;
+    $('demo-session-note').textContent=`دورهٔ تازه برای حساب #${r.login} با سرمایهٔ ${num(r.equity,2)} ${r.currency} ثبت شد. موتور خاموش است؛ پس از شروع، بررسی سفارش جدید بگیرید.`;
+    toast('دورهٔ دمو ثبت شد؛ هیچ سفارشی ارسال نشد.');
+  }catch(e){if(e.reason_code==='demo_session_changed')demoReview=null;toast(e.message,true);$('demo-session-note').textContent=e.message;}
+  finally{demoBusy=false;await poll();}
+});

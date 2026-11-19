@@ -55,6 +55,7 @@ class BrowserTests(unittest.TestCase):
                         self.assertTrue(page.locator("#manual-form").is_visible())
                         self.assertTrue(page.locator("#manual-send").is_disabled())
                         self.assertTrue(page.locator("#manual-check").is_disabled())
+                        self.assertTrue(page.locator("#demo-session-panel").is_hidden())
                         page.locator('[data-page="settings"]').click()
                         self.assertTrue(page.locator("#calendar-auto-button").is_visible())
                         self.assertTrue(page.locator("#calendar-auto-button").is_disabled())
@@ -72,6 +73,44 @@ class BrowserTests(unittest.TestCase):
                         expect(page.locator("#activity-source")).to_contain_text("60")
                         self.assertIn('BLOCKED',page.locator('#manual-status').text_content())
                         self.assertIn('total_risk_cash',page.locator('#manual-result').text_content())
+                        status.update(preview=False,connected=True)
+                        status['account']={'login':123,'server':'test','mode':'demo','currency':'USD',
+                                           'equity':100.,'balance':100.,'profit':0.,'updated_at':time.time()}
+                        expect(page.locator('#demo-session-panel')).to_be_visible()
+                        expect(page.locator('#demo-session-preview')).to_be_disabled()
+                        status.update(running=False,entries_enabled=False)
+                        status['worker']={'phase':'stopped','reason':None}
+                        status['manual_order']={'status':'blocked','reason_code':'fixed_lot_budget',
+                            'details':{'risk_cash':1.96,'risk_budget_cash':.5,'total_risk_cash':9.8,
+                                       'minimum_equity_for_selected_risk':392,'currency':'USD'}}
+                        expect(page.locator('#demo-session-preview')).to_be_enabled()
+                        expect(page.locator('#manual-status')).to_contain_text('392.00')
+                        review={'status':'review','token':'00000000-0000-4000-8000-000000000001',
+                            'login':123,'server':'test','mode':'demo','currency':'USD','equity':100.,'balance':100.,
+                            'previous':{'peak':483.82,'day_start':452.55,'entries':7},
+                            'proposed':{'peak':100.,'day_start':100.,'entries':7},'orders_sent':0}
+                        page.route('**/api/execution/demo-session/preview',lambda route:route.fulfill(
+                            status=200,content_type='application/json',body=json.dumps(review)))
+                        resets=[];starts=[]
+                        page.on('request',lambda request:starts.append(request.url) if request.url.endswith('/execution/start') else None)
+                        def reset_response(route):
+                            resets.append(route.request.post_data_json)
+                            route.fulfill(status=200,content_type='application/json',
+                                          body=json.dumps(review|{'status':'restarted'}))
+                        page.route('**/api/execution/demo-session/restart',reset_response)
+                        page.locator('#demo-session-preview').click()
+                        expect(page.locator('#demo-session-review')).to_be_visible()
+                        expect(page.locator('#demo-session-values')).to_contain_text('483.82')
+                        expect(page.locator('#demo-session-restart')).to_contain_text('100.00 USD')
+                        expect(page.locator('#demo-session-account')).to_contain_text('#123')
+                        page.locator('#demo-session-restart').click()
+                        expect(page.locator('#demo-session-note')).to_contain_text('موتور خاموش است')
+                        expect(page.locator('#demo-session-review')).to_be_hidden()
+                        expect(page.locator('#engine-state')).to_have_text('STANDBY')
+                        self.assertEqual(resets,[{'token':review['token'],'acknowledged_login':123}])
+                        self.assertEqual(starts,[])
+                        status['account']['mode']='live'
+                        expect(page.locator('#demo-session-panel')).to_be_hidden()
                         self.assertEqual(errors,[])
                         browser.close()
                 finally:

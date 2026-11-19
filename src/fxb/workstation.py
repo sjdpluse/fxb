@@ -61,6 +61,7 @@ class Workstation:
         self.last_error = None
         self.active_models = []
         self.manual_pending = None
+        self.demo_session_review = None
         memory = Memory(self.db_path)
         try:
             self.manual_result = memory.get_state("manual-last", None)
@@ -616,6 +617,53 @@ class Workstation:
             finally:
                 memory.close()
         return self.launch_job("reconcile", work)
+
+    def demo_risk_session(self, action, token=None, acknowledged_login=None):
+        """A stopped, flat demo account can explicitly start an audited period."""
+        from .risk_session import demo_snapshot, snapshot_hash, receipt, commit_demo_session
+        if action not in ("preview", "restart"):
+            raise ValueError("Unknown demo risk-period action")
+        with self.lock:
+            if self.preview or self.bridge is None:
+                raise Blocked("Connect your local demo terminal first")
+            if self.worker and self.worker.is_alive() or self.job["status"] == "running":
+                raise Blocked("Stop the worker and wait for background work before a new demo risk period")
+            if action == "restart":
+                if not isinstance(token, str) or str(uuid.UUID(token)) != token:
+                    raise ValueError("A valid review token is required")
+                if type(acknowledged_login) is not int or acknowledged_login != self.config["login"]:
+                    raise Blocked("Confirm the exact demo account shown in the review")
+            with WorkerLock(self.db_path):
+                memory = Memory(self.db_path)
+                try:
+                    current = demo_snapshot(self.bridge, memory, self.config["login"], self.config["server"])
+                    if action == "preview":
+                        result = current | {"status": "review", "token": str(uuid.uuid4()),
+                                            "expires_at": time.time()+120, "orders_sent": 0}
+                        self.demo_session_review = {"token": result["token"], "expires_at": result["expires_at"],
+                                                    "fingerprint": snapshot_hash(current)}
+                        return result
+                    previous = receipt(memory, token, current["login"], current["server"])
+                    if previous:
+                        return previous  # A lost HTTP reply cannot reset a second time.
+                    review = self.demo_session_review
+                    if (not review or token != review["token"] or time.time() > review["expires_at"]
+                            or snapshot_hash(current) != review["fingerprint"]):
+                        raise Blocked("Demo account or risk state changed, or the review expired; preview again",
+                                      code="demo_session_changed")
+                    result = commit_demo_session(memory, current, token)
+                    self.demo_session_review = None
+                    self.authorization = None
+                    self.entries_enabled = False
+                    self.last_error = None
+                    self.worker_state = {"phase": "stopped", "reason": None}
+                    self.bridge.scalp_status = None
+                    self.bridge.neural_status = {"phase": "paused", "reason": "entries_paused"}
+                    self.note("New demo risk period recorded; worker remains stopped", account=current["login"],
+                              equity=current["equity"], event_id=token)
+                    return result
+                finally:
+                    memory.close()
 
     def save_calendar(self, value):
         path = self.state_dir / "calendar-check.json"

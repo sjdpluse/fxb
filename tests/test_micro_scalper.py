@@ -159,6 +159,29 @@ class BasketTests(unittest.TestCase):
             self.send(count=10,lot=.02,fraction=.01)
         self.assertEqual(self.api.calls,0)
 
+    def test_refunded_demo_still_needs_sufficient_cash_for_the_selected_fixed_lot(self):
+        # Reproduce the reported gold quote/ATR/costs without contacting MT5.
+        self.account.equity=self.account.margin_free=100
+        self.guard.day_start=self.guard.peak=100
+        self.m.put_state('guard:'+self.ak,asdict(self.guard))
+        self.meta['spec']['slippage_points']=26
+        self.api.quote.bid=100.;self.api.quote.ask=100.26
+        with self.assertRaises(Blocked) as caught:
+            self.send(atr=3.188571428571387)
+        self.assertEqual(caught.exception.code,'fixed_lot_budget')
+        details=caught.exception.details
+        for key,value in {'risk_cash':1.96,'risk_budget_cash':.5,
+                          'total_risk_cash':9.8,'basket_risk_budget_cash':2.5,
+                          'minimum_equity_for_selected_risk':392}.items():
+            self.assertAlmostEqual(details[key],value,places=6)
+        self.assertEqual(self.api.calls,0)
+        self.account.equity=self.account.margin_free=500
+        self.guard.day_start=self.guard.peak=500
+        self.m.put_state('guard:'+self.ak,asdict(self.guard))
+        result=self.send(atr=3.188571428571387)
+        self.assertEqual(result['orders_sent'],5)
+        self.assertEqual(self.api.calls,5)
+
     def test_manual_target_includes_costs_for_buy_and_sell_without_widening_stop(self):
         for side in (1,-1):
             self.meta['spec'].update(slippage_points=26,commission_per_lot_side=7)

@@ -112,6 +112,14 @@ def request_plan(bridge, account, guard, spec, risk, side, atr, lot, count, frac
     except Blocked as error:
         error.details = {"stage": "local_risk_check", "atr": atr, "spread": spread,
                          "requested_orders": count, "requested_lot": lot, **(error.details or {})}
+        if error.code == "fixed_lot_budget":
+            loss = error.details["risk_cash"]
+            error.details.update(total_risk_cash=loss*count, basket_risk_budget_cash=account.equity*fraction,
+                                 per_order_risk_percent=risk.fraction*100,
+                                 minimum_equity_for_selected_risk=max(loss/risk.fraction, loss*count/fraction),
+                                 minimum_equity_assumes_no_existing_risk_halt=True,
+                                 total_margin_cash=error.details["margin_cash"]*count,
+                                 margin_budget_cash=account.margin_free*risk.margin_fraction)
         raise
     if request["type_filling"] not in (bridge.api.ORDER_FILLING_FOK, bridge.api.ORDER_FILLING_IOC):
         raise Blocked("Baskets require FOK or IOC; unfilled volume must not remain pending")

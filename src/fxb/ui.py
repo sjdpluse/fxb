@@ -165,6 +165,9 @@ def create_app(root=".", preview=False, token=None):
             if action == "execution/stop": return controller.stop(False)
             if action == "execution/flatten": return controller.stop(True)
             if action == "execution/reconcile": return controller.reconcile_orders()
+            if action == "execution/demo-session/preview": return controller.demo_risk_session("preview")
+            if action == "execution/demo-session/restart":
+                return controller.demo_risk_session("restart", payload.get("token"), payload.get("acknowledged_login"))
             if action == "calendar/save": return controller.save_calendar(payload)
             if action == "calendar/auto": return controller.enable_calendar_auto()
             if action == "memory/sync": return controller.sync()

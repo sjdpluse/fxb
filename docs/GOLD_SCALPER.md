@@ -1,4 +1,4 @@
-# Gold M1 scalper — 0.5.1
+# Gold M1 scalper — 0.5.2
 
 ## Micro baskets and manual orders
 
@@ -83,6 +83,37 @@ but cannot be used as an autonomous learning sample.
 Official protocol references: [account modes](https://www.mql5.com/en/docs/constants/environment_state/accountinformation),
 [order check](https://www.mql5.com/en/docs/python_metatrader5/mt5ordercheck_py),
 [trade return codes](https://www.mql5.com/en/docs/constants/errorswarnings/enum_trade_return_codes).
+
+## Starting a new demo risk period
+
+Equity guards cover the entire account, including manual trading. A persistent
+drawdown halt is not evidence that FXB placed the losing trades. Re-funding the
+same demo account, changing its profile or restarting FXB does not clear it.
+
+After re-funding a **demo** account, stop the worker, finish basket settlement
+and resolve any uncertain orders. The account must have no positions or pending
+orders. In Execution, choose **بررسی شروع دورهٔ جدید دمو**, review the actual
+account number, server, equity and previous/new baselines, then explicitly record
+the new period. The review expires after two minutes; changes to the account,
+equity, balance, current-day entries or guard require another review.
+
+The backend rechecks the actual MT5 demo mode and configured login/server while
+holding the worker lease. It atomically records an audit event and sets day-start
+and peak equity to current equity, clearing only that account's two risk halts.
+Current-day entry counts, model learning, order receipts, other account guards
+and the STOP file remain intact. The worker stays off; restarting execution is
+a separate action. Retrying an already recorded request does not rebase again.
+There is no live-account reset and no automatic adjustment for deposits.
+
+A fresh risk period **does not waive position-sizing limits**. For example, a
+reported 0.01-lot gold order with 1.96 USD estimated stop risk cannot fit a
+100 USD account's 0.5% allowance (0.50 USD). Five such orders need 9.80 USD;
+their 2.5% basket allowance is only 2.50 USD. With the same quote and costs,
+both selected risk limits imply at least 392 USD equity. This is a calculation,
+not a funding recommendation or a guarantee of margin/news/broker acceptance.
+The UI and `fixed_lot_budget` receipt display these numbers; recalculate using
+the latest quote after connecting the intended demo balance. Limits are not
+silently raised and SL is not narrowed to force an order through.
 
 ## Worker recovery and observable neural activity
 

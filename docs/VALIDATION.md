@@ -1,5 +1,27 @@
 # Validation record
 
+## v0.5.2 — Explicit demo risk periods — 2026-11-19 (Asia/Kabul)
+
+- Added a reviewed, account-bound restart for a re-funded demo account. The
+  worker must be stopped and the account flat, with no unresolved order or active
+  basket. Live/contest accounts and terminal account switches are rejected.
+- The old and new guards are saved with the audit receipt in the same SQLite
+  transaction. Retries return the original receipt; expired or changed reviews
+  cannot be applied. Entry counts, learning, order receipts and STOP are preserved.
+- Fixed-lot diagnostics now include aggregate risk, selected allowances and
+  minimum equity implied by those allowances. A regression reproduces the
+  reported 1.96 USD risk / 0.50 USD allowance and verifies zero submissions at
+  100 USD, then five protected fake-broker entries at a fresh 500 USD baseline.
+- Local core suite: **223 tests, 214 passed, 9 skipped**. New tests exercise
+  authentication, actual account mode, exposure checks, concurrent worker leases,
+  changed/expired reviews, lost-reply idempotency and audit-transaction rollback.
+  JavaScript syntax checks pass. Browser coverage includes preview/live hiding,
+  disabled controls while running, old/new values, explicit confirmation and a
+  stopped engine after recording the period. Hosted Windows/Linux/Chromium results
+  are attached to the release commit workflow; local Chromium launch is restricted.
+- Broker execution in regression tests uses fakes. No user-terminal orders were
+  sent, no risk limits were increased and no profitability claim is implied.
+
 ## v0.5.1 — Worker recovery, bounded warmup and costed targets — 2026-11-19 (Asia/Kabul)
 
 - OS-held worker lease with dead-owner legacy migration. Startup refuses an active
