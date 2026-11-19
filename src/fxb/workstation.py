@@ -49,6 +49,7 @@ class Workstation:
         self.bridge = None
         self.brain = None
         self.worker = None
+        self.worker_state = {"phase": "stopped", "reason": None}
         self.authorization = None
         self.entries_enabled = False
         self.mode = "dry-run"
@@ -64,9 +65,13 @@ class Workstation:
         try:
             self.manual_result = memory.get_state("manual-last", None)
             if self.manual_result and self.manual_result.get("status") in ("queued", "processing"):
-                self.manual_result.update(status="interrupted", reason="Worker restarted; inspect broker history. No automatic replay.")
-                memory.put_state("manual:"+self.manual_result["request_id"], self.manual_result)
-                memory.put_state("manual-last", self.manual_result)
+                try:
+                    with WorkerLock(self.db_path):
+                        self.manual_result.update(status="interrupted", reason="Worker restarted; inspect broker history. No automatic replay.")
+                        memory.put_state("manual:"+self.manual_result["request_id"], self.manual_result)
+                        memory.put_state("manual-last", self.manual_result)
+                except Blocked:
+                    pass  # A second UI must not rewrite an active worker's intent.
         finally:
             memory.close()
         self.config = {"login": None, "server": "", "terminal": "", "calendar": "data/news.json", "calendar_auto": False,
@@ -130,6 +135,7 @@ class Workstation:
             for policy in getattr(self.bridge, "_scalp_policies", {}).values():
                 if policy[0].net is not None:
                     activity = policy[0].latest | {"input_source": "closed_market_bars"}
+            activity = activity | {"execution": getattr(self.bridge, "neural_status", None)}
         memory = Memory(self.db_path)
         try:
             journal = memory.stats()
@@ -145,6 +151,7 @@ class Workstation:
         news["refresh"] = dict(self.calendar_refresh)
         return {"version": __version__, "preview": self.preview, "platform": os.name, "news": news,
                 "running": bool(self.worker and self.worker.is_alive()), "entries_enabled": self.entries_enabled,
+                "worker": dict(self.worker_state),
                 "mode": self.mode, "account": self.account_data, "positions": self.positions, "quotes": self.quotes,
                 "models": self.models(), "datasets": self.datasets(), "active_models": self.active_models,
                 "brain": {"manifest": manifest, "activity": activity}, "job": dict(self.job),
@@ -426,6 +433,10 @@ class Workstation:
                 memory.put_state("manual-last", self.manual_result)
 
     def start(self, model_paths, mode="dry-run", acknowledged_login=None, hours=8):
+        with self.lock:
+            return self._start(model_paths, mode, acknowledged_login, hours)
+
+    def _start(self, model_paths, mode, acknowledged_login, hours):
         if self.preview:
             raise Blocked("The preview cannot activate a trading account")
         if self.bridge is None:
@@ -450,17 +461,34 @@ class Workstation:
         broker_mode = self.account_data["mode"]
         if mode != "dry-run" and mode != broker_mode:
             raise Blocked("Chosen execution mode does not match the connected account")
-        # Keep a running basket tied to its original frozen profile so live
-        # authorization and reward attribution remain valid after a restart.
-        memory = Memory(self.db_path)
         try:
-            ak = hashlib.sha256(f"{self.config['server']}:{self.config['login']}".encode()).hexdigest()[:20]
-            gid = memory.get_state("active-basket:"+ak)
-            group = memory.get_state("basket:"+gid) if gid else None
-            if group and (len(paths) != 1 or sha256(paths[0]) != group["digest"]):
-                raise Blocked("Restart the basket's original profile to finish management and reconciliation")
-        finally:
-            memory.close()
+            lease = WorkerLock(self.db_path).__enter__()
+        except Blocked as error:
+            self.entries_enabled = False
+            self.last_error = str(error)
+            self.worker_state = {"phase": "blocked", "reason": str(error),
+                                 "reason_code": error.code, "details": error.details}
+            raise
+        try:
+            # Validate recovery under the same lease used by the new worker.
+            memory = Memory(self.db_path)
+            try:
+                ak = hashlib.sha256(f"{self.config['server']}:{self.config['login']}".encode()).hexdigest()[:20]
+                gid = memory.get_state("active-basket:"+ak)
+                group = memory.get_state("basket:"+gid) if gid else None
+                if group and (len(paths) != 1 or sha256(paths[0]) != group["digest"]):
+                    raise Blocked("Restart the basket's original profile to finish management and reconciliation")
+            finally:
+                memory.close()
+            return self._start_worker(paths, metas, mode, broker_mode, acknowledged_login, hours, lease)
+        except BaseException as error:
+            lease.__exit__()
+            self.entries_enabled = False
+            self.last_error = str(error)
+            self.worker_state = {"phase": "failed", "reason": str(error)}
+            raise
+
+    def _start_worker(self, paths, metas, mode, broker_mode, acknowledged_login, hours, lease):
         self.authorization = None
         if mode == "live":
             self.authorization = LiveAuthorization.activate(self.config["login"], self.config["server"],
@@ -476,66 +504,87 @@ class Workstation:
         self.bridge._micro_histories = {}
         self.bridge._micro_context = {}
         self.bridge.scalp_status = None
+        self.bridge.neural_status = {"phase": "waiting_for_data", "reason": "Waiting for fresh M1 data"}
+        self.worker_state = {"phase": "starting", "reason": None, "lock_recovered": lease.recovered}
         gc.collect()
         (self.root / "STOP").unlink(missing_ok=True)
         def run():
-            memory = Memory(self.db_path)
+            memory = None
             try:
-                with WorkerLock(self.db_path):
-                    self.note("Trading worker started", mode=mode)
-                    blocked_reasons = {}
-                    while not self.worker_stop.is_set():
-                        for path in paths:
-                            with self.lock:
-                                intent, self.manual_pending = self.manual_pending, None
-                                if intent:
-                                    self.manual_result = intent | {"status": "processing"}
-                            try:
-                                from .basket_runtime import execution_step
-                                is_scalper = bool(metas[paths.index(path)].get("strategy"))
-                                runner = execution_step if is_scalper else cycle
-                                extra = {"manual": intent, "cancelled": lambda: self.worker_stop.is_set() or
-                                    (self.root/"STOP").exists() or (not intent and not self.entries_enabled)} if is_scalper else {}
-                                result = runner(self.bridge, path, memory, self.config["login"],
-                                    calendar=str(self.root / self.config["calendar"]), execute=mode != "dry-run",
-                                    kill_file=str(self.root / "STOP"), mode=broker_mode,
-                                    expected_server=self.config["server"], authorization=self.authorization,
-                                    entries_enabled=self.entries_enabled, **extra)
-                                self.finish_manual(memory, intent, result)
-                                blocked_reasons.pop(str(path), None)
-                                self.last_error = None
-                            except Blocked as e:
-                                self.finish_manual(memory, intent, {"status": "blocked", "reason": str(e), "details": e.details})
-                                self.last_error = str(e)
-                                if is_scalper and getattr(self.bridge, "scalp_status", None):
-                                    self.bridge.scalp_status["last_decision"] = {
-                                        "action": "WAIT", "reason": str(e), "reason_code": e.code, "details": e.details}
-                                if memory.unresolved():
-                                    self.entries_enabled = False
-                                if blocked_reasons.get(str(path)) == str(e):
-                                    continue
-                                blocked_reasons[str(path)] = str(e)
-                                self.note(str(e), "warning", operation="execution_wait")
-                                result = {"action": "WAIT", "status": "blocked", "reason": str(e)}
-                            if result.get("reason") != "already_processed_bar" and not result.get("repeat"):
-                                self.last_decisions.append(result | {"time": time.time(), "model": path.parent.name})
-                                self.last_decisions = self.last_decisions[-100:]
+                memory = Memory(self.db_path)
+                self.note("Trading worker started", mode=mode)
+                blocked_reasons = {}
+                while not self.worker_stop.is_set():
+                    self.worker_state["cycle_started_at"] = time.time()
+                    for path in paths:
+                        with self.lock:
+                            intent, self.manual_pending = self.manual_pending, None
+                            if intent:
+                                self.manual_result = intent | {"status": "processing"}
                         try:
-                            self.refresh_account()
+                            from .basket_runtime import execution_step
+                            is_scalper = bool(metas[paths.index(path)].get("strategy"))
+                            runner = execution_step if is_scalper else cycle
+                            extra = {"manual": intent, "cancelled": lambda: self.worker_stop.is_set() or
+                                (self.root/"STOP").exists() or (not intent and not self.entries_enabled)} if is_scalper else {}
+                            result = runner(self.bridge, path, memory, self.config["login"],
+                                calendar=str(self.root / self.config["calendar"]), execute=mode != "dry-run",
+                                kill_file=str(self.root / "STOP"), mode=broker_mode,
+                                expected_server=self.config["server"], authorization=self.authorization,
+                                entries_enabled=self.entries_enabled, **extra)
+                            self.finish_manual(memory, intent, result)
+                            blocked_reasons.pop(str(path), None)
+                            failure = result.get("error") or {}
+                            blocked = result.get("status") in ("blocked", "rejected")
+                            self.last_error = (failure.get("reason") or result.get("reason")) if blocked else None
+                            self.worker_state.update(phase="blocked" if blocked else "waiting" if result.get("action") == "WAIT" else "running",
+                                                     reason=failure.get("reason") or result.get("reason"),
+                                                     reason_code=failure.get("code"), details=failure.get("details"))
                         except Blocked as e:
+                            self.finish_manual(memory, intent, {"status": "blocked", "reason": str(e), "reason_code": e.code, "details": e.details, "orders_sent": 0})
                             self.last_error = str(e)
-                        self.worker_stop.wait(.5 if any(m.get("scalp_config", {}).get("style") == "micro" for m in metas) else 2)
+                            self.worker_state.update(phase="blocked", reason=str(e), reason_code=e.code, details=e.details)
+                            if is_scalper and getattr(self.bridge, "scalp_status", None):
+                                self.bridge.scalp_status["last_decision"] = {
+                                    "action": "WAIT", "reason": str(e), "reason_code": e.code, "details": e.details}
+                            if memory.unresolved():
+                                self.entries_enabled = False
+                            if blocked_reasons.get(str(path)) == str(e):
+                                continue
+                            blocked_reasons[str(path)] = str(e)
+                            self.note(str(e), "warning", operation="execution_wait")
+                            result = {"action": "WAIT", "status": "blocked", "reason": str(e)}
+                        if result.get("reason") != "already_processed_bar" and not result.get("repeat"):
+                            self.last_decisions.append(result | {"time": time.time(), "model": path.parent.name})
+                            self.last_decisions = self.last_decisions[-100:]
+                    try:
+                        self.refresh_account()
+                    except Blocked as e:
+                        self.last_error = str(e)
+                    self.worker_state["cycle_completed_at"] = time.time()
+                    self.worker_stop.wait(.5 if any(m.get("scalp_config", {}).get("style") == "micro" for m in metas) else 2)
             except Exception as e:
                 self.last_error = str(e)
                 self.entries_enabled = False
+                self.worker_state.update(phase="failed", reason=str(e))
                 self.note(str(e), "error", operation="execution")
             finally:
-                with self.lock:
-                    unfinished = self.manual_pending or (self.manual_result if self.manual_result and
-                        self.manual_result.get("status") == "processing" else None)
-                    self.manual_pending = None
-                    self.finish_manual(memory, unfinished, {"status": "interrupted", "reason": "Worker stopped; no automatic replay"})
-                memory.close()
+                try:
+                    with self.lock:
+                        unfinished = self.manual_pending or (self.manual_result if self.manual_result and
+                            self.manual_result.get("status") == "processing" else None)
+                        self.manual_pending = None
+                        if memory is not None:
+                            self.finish_manual(memory, unfinished, {"status": "interrupted", "reason": "Worker stopped; no automatic replay"})
+                        self.entries_enabled = False
+                        if self.worker_state["phase"] != "failed":
+                            self.worker_state.update(phase="stopped", reason=None)
+                finally:
+                    try:
+                        if memory is not None:
+                            memory.close()
+                    finally:
+                        lease.__exit__()
                 self.note("Trading worker stopped; inspect any remaining broker positions")
         self.worker = threading.Thread(target=run, daemon=True, name="fxb-execution")
         self.worker.start()
@@ -586,6 +635,8 @@ class Workstation:
             return {"status": "flatten_requested"}
         self.worker_stop.set()
         self.entries_enabled = False
+        if self.worker and self.worker.is_alive():
+            self.worker_state.update(phase="stopping", reason=None)
         return {"status": "stopping", "positions_closed": False}
 
     def journal(self):

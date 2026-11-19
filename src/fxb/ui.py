@@ -85,7 +85,8 @@ def create_app(root=".", preview=False, token=None):
     @app.exception_handler(KeyError)
     @app.exception_handler(TypeError)
     def invalid(request, error):
-        return JSONResponse({"error": str(error)}, status_code=409)
+        return JSONResponse({"error": str(error), "reason_code": getattr(error, "code", None),
+                             "details": getattr(error, "details", None)}, status_code=409)
 
     @app.get("/api/status")
     def status():

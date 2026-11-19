@@ -1,11 +1,12 @@
-# Gold M1 scalper — 0.5.0
+# Gold M1 scalper — 0.5.1
 
 ## Micro baskets and manual orders
 
 The new UI default is **Micro**, saved as a separate `M1-micro` profile. Old
 Active/Structure profiles keep their previous behavior and learning scopes.
 No long historical training is required: the full connectome still encodes
-500 recent closed M1 bars, and the bounded readout learns from completed trades.
+features calculated from 500 recent closed M1 bars (64 neural warmup windows,
+then newly closed bars), and the bounded readout learns from completed trades.
 Biological weights are fixed. This release adds an explicit quote trigger around
 that context, not pretrained general market intelligence.
 
@@ -35,7 +36,13 @@ Children are submitted sequentially, with a durable unique order claim each.
 Every position receives broker SL/TP. Only FOK/IOC filling is supported for
 baskets; RETURN is rejected because an unfilled remainder could stay pending. Stops use at least 0.45 M1 ATR, 4.1
 spreads and the broker minimum distance; net planned reward must cover risk
-including configured costs. A rejection, partial fill, expired signal, operator
+including configured costs. In 0.5.1 the initial target is priced for the
+configured **net** reward/risk ratio using `order_calc_profit`. Configured
+round-trip commission and slippage are included; volume and SL are unchanged.
+The target cannot exceed 2.5 ATR times the configured reward ratio. Incompatible
+costs remain blocked with the required target, cash risk and cost inputs shown.
+Every repriced child still needs net reward at least equal to its stop risk.
+A rejection, partial fill, expired signal, operator
 stop or unknown response cancels remaining children. Already-confirmed positions
 continue being managed. Unknown entries are never automatically retried; they
 do not prevent closing a separately proven position. Unknown closes cannot be
@@ -76,6 +83,33 @@ but cannot be used as an autonomous learning sample.
 Official protocol references: [account modes](https://www.mql5.com/en/docs/constants/environment_state/accountinformation),
 [order check](https://www.mql5.com/en/docs/python_metatrader5/mt5ordercheck_py),
 [trade return codes](https://www.mql5.com/en/docs/constants/errorswarnings/enum_trade_return_codes).
+
+## Worker recovery and observable neural activity
+
+Version 0.5.1 acquires the worker lease before acknowledging startup or clearing
+STOP. A second active worker is refused with its owner PID and lock path. The
+OS releases the lease when a process exits, including after a crash. The
+`.worker.guard` file stays on disk intentionally; its existence is not evidence
+of a running worker. Do not delete lock files while FXB is running.
+
+A legacy PID-only `.worker.lock` is migrated automatically only after the owner
+is proven dead. A living PID, denied process inspection or unreadable legacy
+marker remains blocked. Close the previous FXB process before restarting; the
+application never kills processes or cancels broker positions to recover a lock.
+
+The engine card distinguishes STARTING, INITIALIZING, WARMUP, WAITING, BLOCKED,
+RUNNING, PAUSED and FAILED. Micro warmup advances at most four neural windows
+per worker cycle, so queued manual intents and stop requests are checked between
+batches. Initial graph loading/JIT and an individual neural window are still
+synchronous; they cannot be interrupted by this change. Manual controls are
+disabled during initial graph loading, then become available between batches.
+
+Neural counts describe the **last actual simulation window**, not continuously
+active neurons. The panel shows the last processing time, remaining warmup bars,
+or why inference is suspended (paused entries, entry gate, basket management).
+Quote pressure and open-position exits do not need a new neural simulation on
+every tick. Manual orders do not need a neural signal and are not training data.
+A second UI opening cannot mark the active worker's pending intent interrupted.
 
 ## Active deployment profile
 

@@ -1,5 +1,27 @@
 # Validation record
 
+## v0.5.1 — Worker recovery, bounded warmup and costed targets — 2026-11-19 (Asia/Kabul)
+
+- OS-held worker lease with dead-owner legacy migration. Startup refuses an active
+  lease synchronously; thread startup/fatal errors release ownership and show FAILED.
+- Micro neural warmup yields between four-window batches. Last inference time,
+  remaining bars and explicit waiting/block reasons are visible in the workstation.
+- Basket/manual TP is calculated after costs without widening SL or volume, and
+  remains bounded by volatility. Local rejection codes and numeric details persist
+  in manual receipts; broker checks still send no orders.
+- Local core suite: **211 tests, 202 passed, 9 skipped**. Regression coverage includes
+  a killed owner process, living/unknown/dead legacy PIDs, concurrent acquisition,
+  synchronous startup failure, fatal worker cleanup, incremental neural equivalence,
+  manual checks during warmup, both order sides with costs, excessive-cost rejection
+  and aggregate-budget preservation.
+- Published-graph M1 suite: **30/30 passed**, including exact output/spike/simulation
+  time equivalence between single-pass and incremental warmup on the full graph.
+- Local Chromium could not launch because process-singleton sockets were denied;
+  the expanded hosted browser check covers BLOCKED/WARMUP transitions and visible
+  manual diagnostics. Hosted
+  Windows/Linux and browser outcomes are recorded by the release commit workflow.
+- Native user-terminal execution is not tested here; no MT5 orders were sent.
+
 ## v0.5.0 — Micro baskets and queued manual orders — 2026-11-19 (Asia/Kabul)
 
 - Added separately versioned Micro profiles with causal quote momentum, five to

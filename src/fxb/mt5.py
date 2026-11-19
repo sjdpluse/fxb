@@ -45,23 +45,113 @@ def closed_bar_status(opened_at, period, now):
             "bar_close_utc": iso(closed_at), "checked_at_utc": iso(now), "age_seconds": age}
 
 
+def _process_alive(pid):
+    """False only for a proven dead PID; access errors are not permission to steal."""
+    if type(pid) is not int or not 0 < pid < 2**32:
+        return None
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        kernel.WaitForSingleObject.restype = wintypes.DWORD
+        kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel.CloseHandle.restype = wintypes.BOOL
+        handle = kernel.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE, no terminate rights
+        if not handle:
+            return False if ctypes.get_last_error() == 87 else None
+        try:
+            result = kernel.WaitForSingleObject(handle, 0)
+            return {0: False, 258: True}.get(result)
+        finally:
+            kernel.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return None
+
+
 class WorkerLock:
-    """Single worker per state directory; a crash leaves a fail-closed lock."""
+    """OS-held lease plus a marker compatible with older FXB workers.
+
+    The guard inode is permanent: unlinking it could let two processes lock
+    different inodes. The OS releases its lock on process death. Old PID-only
+    markers are recovered only when that process is proven dead.
+    """
     def __init__(self, database):
-        self.path = Path(str(database) + ".worker.lock")
+        self.path = Path(str(Path(database).resolve()) + ".worker.lock")
+        self.guard_path = self.path.with_suffix(".guard")
+        self.fd = None
+        self.marker = None
+        self.recovered = False
+
+    def _owner(self):
+        try:
+            return json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
+    def _blocked(self, message, code):
+        owner = self._owner()
+        return Blocked(message, code=code, details={"lock_path": str(self.path),
+            "owner_pid": owner.get("pid") if isinstance(owner, dict) else owner})
+
+    def _release_guard(self):
+        if self.fd is not None:
+            os.close(self.fd)  # Closing releases flock / the Windows byte-range lock.
+            self.fd = None
 
     def __enter__(self):
+        if self.fd is not None:
+            raise RuntimeError("WorkerLock cannot be entered twice")
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.fd = os.open(self.guard_path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            raise Blocked("Worker lock exists; verify no worker is running before removing it") from None
-        with os.fdopen(fd, "w") as f:
-            f.write(str(os.getpid()))
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(self.fd, msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                raise self._blocked("Another FXB worker holds the execution lock; stop that worker first",
+                                    "worker_lock_busy") from None
+            if self.path.exists():
+                owner = self._owner()
+                modern = isinstance(owner, dict) and owner.get("protocol") == "fxb-os-lease-v1"
+                if not modern and _process_alive(owner) is not False:
+                    raise self._blocked("Legacy worker lock owner is running or cannot be verified; close the old FXB process first",
+                                        "worker_lock_legacy")
+                self.path.unlink()
+                self.recovered = True
+            # O_EXCL also excludes an older worker that does not use the guard.
+            try:
+                fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                raise self._blocked("Another worker acquired the execution lock", "worker_lock_busy") from None
+            self.marker = json.dumps({"protocol": "fxb-os-lease-v1", "pid": os.getpid(), "token": uuid.uuid4().hex})
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(self.marker)
+                f.flush()
+                os.fsync(f.fileno())
+        except BaseException:
+            self._release_guard()
+            raise
         return self
 
     def __exit__(self, *args):
-        self.path.unlink()
+        try:
+            if self.marker is not None and self.path.exists() and self.path.read_text(encoding="utf-8") == self.marker:
+                self.path.unlink()
+        finally:
+            self.marker = None
+            self._release_guard()
 
 
 class NewsGate:

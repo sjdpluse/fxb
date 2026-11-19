@@ -1,5 +1,6 @@
 """Opt-in actual Chromium smoke test for the M1 workstation controls."""
 import os
+import json
 from pathlib import Path
 import socket
 import subprocess
@@ -57,6 +58,20 @@ class BrowserTests(unittest.TestCase):
                         page.locator('[data-page="settings"]').click()
                         self.assertTrue(page.locator("#calendar-auto-button").is_visible())
                         self.assertTrue(page.locator("#calendar-auto-button").is_disabled())
+                        status=page.request.get(url+'api/status').json()
+                        status['worker']={'phase':'blocked','reason':'Another FXB worker holds the execution lock'}
+                        page.route('**/api/status',lambda route:route.fulfill(status=200,content_type='application/json',body=json.dumps(status)))
+                        page.locator('[data-page="execution"]').click()
+                        page.wait_for_function("document.getElementById('engine-state').textContent === 'BLOCKED'")
+                        self.assertIn('Another FXB worker',page.locator('#engine-detail').text_content())
+                        status['running']=True;status['entries_enabled']=True
+                        status['worker']={'phase':'waiting','reason':'neural_warmup'}
+                        status['brain']['activity']['execution']={'phase':'warming_up','remaining_bars':60,'reason':'neural_warmup'}
+                        status['manual_order']={'status':'blocked','reason_code':'basket_budget','details':{'total_risk_cash':10,'risk_budget_cash':5}}
+                        page.wait_for_function("document.getElementById('engine-state').textContent === 'WARMUP'")
+                        page.wait_for_function("document.getElementById('activity-source').textContent.includes('60')")
+                        self.assertIn('BLOCKED',page.locator('#manual-status').text_content())
+                        self.assertIn('total_risk_cash',page.locator('#manual-result').text_content())
                         self.assertEqual(errors,[])
                         browser.close()
                 finally:

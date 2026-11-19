@@ -252,8 +252,14 @@ class WholeBrain:
         self.reset()
         return np.asarray([self.step(x) for x in observations])
 
-    def observe(self, observations, timestamps):
-        """Consume only newly closed bars in a persistent execution session."""
+    def observe(self, observations, timestamps, max_bars=None):
+        """Consume closed bars; bounded batches yield to order/stop processing.
+
+        None means more bars remain, not a usable trading embedding. The
+        default retains the full synchronous encoder used by existing models.
+        """
+        if max_bars is not None and (type(max_bars) is not int or max_bars < 1):
+            raise ValueError("max_bars must be a positive integer")
         if self.last_time is None:
             self.reset()
             start = max(0, len(observations) - 64)
@@ -261,10 +267,13 @@ class WholeBrain:
             start = int(np.searchsorted(timestamps, self.last_time, side="right"))
             if start == 0:
                 raise ValueError("Market history moved backwards")
-        for i in range(start, len(observations)):
+        end = len(observations) if max_bars is None else min(len(observations), start + max_bars)
+        for i in range(start, end):
             self.last_embedding = self.step(observations[i])
             self.last_time = float(timestamps[i])
-        return self.last_embedding
+            self.latest = self.latest | {"observed_at": time.time(), "market_bar_open_at": self.last_time}
+        self.observation_progress = {"remaining_bars": len(observations)-end, "processed_this_cycle": end-start}
+        return self.last_embedding if end == len(observations) else None
 
 
 def geometry(directory=None):

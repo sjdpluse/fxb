@@ -380,6 +380,14 @@ class FullScalperTests(unittest.TestCase):
         np.testing.assert_array_equal(brain.observe(raw,b.time),encoded)
         self.assertEqual(brain.latest["simulation_ms"],simulation)
         self.assertEqual(len(brain.ids),138639)
+        expected_spikes=brain.latest["spikes"]
+        brain.reset()
+        for batch in range(16):
+            incremental=brain.observe(raw,b.time,max_bars=4)
+            if batch<15:self.assertIsNone(incremental)
+        np.testing.assert_array_equal(incremental,encoded)
+        self.assertEqual(brain.latest["spikes"],expected_spikes)
+        self.assertEqual(brain.latest["simulation_ms"],simulation)
         with tempfile.TemporaryDirectory() as temp:
             b.synthetic=False
             bridge=MT5(FakeMT5())

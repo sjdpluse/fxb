@@ -118,7 +118,7 @@ class BasketTests(unittest.TestCase):
         self.m.put_state('guard:'+self.ak,asdict(self.guard))
         self.options=dict(execute=True,mode='demo',expected_server='test',authorization=None,
             model_hash=self.digest,risk_config=self.meta['risk'],entry_period_seconds=60)
-        self.brain=NS(last_time=None,observe=lambda x,t:np.r_[x[-1],np.ones(64)])
+        self.brain=NS(last_time=None,observe=lambda x,t,**kw:np.r_[x[-1],np.ones(64)])
         self.news=self.root/'news.json'
         self.news.write_text(json.dumps({'coverage_start':iso(self.now-100),'coverage_end':iso(self.now+5000),
             'updated_at':iso(self.now-1),'source_url':'https://www.bls.gov/schedule/','events':[]}))
@@ -158,6 +158,67 @@ class BasketTests(unittest.TestCase):
         with self.assertRaisesRegex(Blocked,'Entire requested basket'):
             self.send(count=10,lot=.02,fraction=.01)
         self.assertEqual(self.api.calls,0)
+
+    def test_manual_target_includes_costs_for_buy_and_sell_without_widening_stop(self):
+        for side in (1,-1):
+            self.meta['spec'].update(slippage_points=26,commission_per_lot_side=7)
+            result=self.send(side=side,count=1,intent={'check_only':True})
+            plan=result['plan']
+            self.assertEqual(result['status'],'checked')
+            self.assertTrue(result['broker_contacted'])
+            self.assertTrue(plan['target_adjusted_for_costs'])
+            self.assertGreaterEqual(plan['net_reward_risk']+1e-7,self.risk.reward_risk)
+            self.assertAlmostEqual(plan['costs']['slippage_price_per_side'],.26)
+            self.assertAlmostEqual(plan['costs']['round_trip_commission_cash'],.14)
+            entry=self.api.quote.ask if side>0 else self.api.quote.bid
+            self.assertAlmostEqual(side*(entry-plan['sl']),.45,places=7)
+            self.assertEqual(result['orders_sent'],0)
+            self.assertEqual(self.api.calls,0)
+
+    def test_cost_adjusted_manual_order_reaches_broker_and_keeps_protection(self):
+        self.meta['spec'].update(slippage_points=26,commission_per_lot_side=7)
+        result=self.send(count=1,intent={'check_only':False})
+        self.assertEqual(result['orders_sent'],1)
+        self.assertEqual(self.api.calls,1)
+        self.assertEqual(self.api.open_positions[0].sl,result['plan']['sl'])
+        self.assertEqual(self.api.open_positions[0].tp,result['plan']['tp'])
+
+    def test_excessive_costs_remain_blocked_with_numeric_diagnostics(self):
+        self.meta['spec']['slippage_points']=500
+        with self.assertRaises(Blocked) as caught:self.send(count=1,intent={'check_only':False})
+        self.assertEqual(caught.exception.code,'target_cost_limit')
+        detail=caught.exception.details
+        self.assertGreater(detail['required_tp']-self.api.quote.ask,detail['max_target_distance'])
+        self.assertGreater(detail['loss_per_order'],0)
+        self.assertEqual(self.api.calls,0)
+
+    def test_cost_adjustment_does_not_bypass_aggregate_risk(self):
+        self.account.equity=300;self.guard.day_start=300;self.guard.peak=300
+        self.meta['spec']['slippage_points']=26
+        with self.assertRaises(Blocked) as caught:self.send(count=10,intent={'check_only':False})
+        self.assertEqual(caught.exception.code,'basket_budget')
+        self.assertGreater(caught.exception.details['total_risk_cash'],caught.exception.details['risk_budget_cash'])
+        self.assertEqual(self.api.calls,0)
+
+    def test_manual_check_can_run_between_incomplete_neural_batches(self):
+        self.brain.observe=lambda *args,**kw:None
+        self.brain.observation_progress={'remaining_bars':60,'processed_this_cycle':4}
+        self.assertEqual(self.step()['reason'],'neural_warmup')
+        self.assertEqual(self.bridge.neural_status['remaining_bars'],60)
+        self.brain.observe=lambda *args,**kw:(_ for _ in ()).throw(AssertionError('Manual request must not wait for neurons'))
+        result=self.step(manual={'side':1,'count':1,'lot':.01,'check_only':True,'expires_at':self.now+10})
+        self.assertEqual(result['status'],'checked')
+        self.assertEqual(result['orders_sent'],0)
+        self.assertIsNone(self.bridge._micro_context[self.digest]['encoded'])
+
+    def test_blocked_and_paused_neural_phases_explain_zero_activity(self):
+        self.assertEqual(self.step(entries_enabled=False)['reason'],'entries_paused')
+        self.assertEqual(self.bridge.neural_status['phase'],'paused')
+        self.guard.daily_halt=True;self.m.put_state('guard:'+self.ak,asdict(self.guard))
+        self.brain.observe=lambda *args,**kw:(_ for _ in ()).throw(AssertionError('Entry gate should explain suspended inference'))
+        result=self.step()
+        self.assertEqual(result['reason'],'daily_loss')
+        self.assertEqual(self.bridge.neural_status['phase'],'entry_blocked')
 
     def test_remaining_daily_loss_allowance_is_reserved_for_entire_basket(self):
         self.account.equity=9701  # only $1 remains above the existing daily floor

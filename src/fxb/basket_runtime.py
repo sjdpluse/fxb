@@ -13,7 +13,7 @@ import time
 import uuid
 import numpy as np
 from .data import KABUL, day_key
-from .risk import Spec, Risk, Guard
+from .risk import Spec, Risk, Guard, round_price
 from .mt5 import Blocked, MAGIC, NewsGate, closed_bar_status
 from .scalping import (ScalpConfig, analyze, readout_context, learning_state, entry_score, learn_closed)
 from .scalper_runtime import policy, learning_scope, scalp_cycle
@@ -54,6 +54,45 @@ def budget_check(account, guard, risk, risk_cash, margin_cash, count, fraction):
     return detail
 
 
+def costed_target(bridge, request, spec, risk, atr):
+    """Price the planned reward AFTER costs without widening the stop or lot.
+
+    Use the broker's account-currency calculator, including for the marginal
+    price increment. Repricing is bounded by the existing 2.5 ATR structural
+    stop envelope times the configured reward ratio, and verified afterwards.
+    """
+    original_target = request["tp"]
+    side = 1 if request["type"] == bridge.api.ORDER_TYPE_BUY else -1
+    loss, gain, margin = order_cost(bridge, request, spec)
+    required_gain = loss*risk.reward_risk
+    max_distance = 2.5*atr*risk.reward_risk
+    costs = {"slippage_points_per_side": spec.slippage_points,
+             "slippage_price_per_side": math.ceil(spec.slippage_points)*spec.point,
+             "commission_per_lot_side": spec.commission_per_lot_side,
+             "round_trip_commission_cash": 2*spec.commission_per_lot_side*request["volume"]}
+    details = {"original_tp": original_target, "required_net_gain_cash": required_gain,
+               "loss_per_order": loss, "net_gain_per_order": gain,
+               "max_target_distance": max_distance, "currency": spec.currency, "costs": costs}
+    if gain+1e-8 < required_gain:
+        per_tick = bridge.api.order_calc_profit(request["type"], spec.symbol, request["volume"],
+                                              original_target, original_target+side*spec.tick_size)
+        if per_tick is None or not math.isfinite(per_tick) or per_tick <= 0:
+            raise Blocked("Broker could not price a cost-adjusted target", code="target_calculation", details=details)
+        ticks = math.ceil((required_gain-gain)/per_tick)
+        target = round_price(original_target+side*ticks*spec.tick_size, spec.tick_size, up=side > 0)
+        details["required_tp"] = target
+        if target <= 0 or side*(target-request["price"]) > max_distance+1e-8:
+            raise Blocked("Configured costs require a target beyond the scalp volatility limit",
+                          code="target_cost_limit", details=details)
+        request = request | {"tp": target}
+        loss, gain, margin = order_cost(bridge, request, spec)
+    if gain+1e-7 < required_gain:
+        raise Blocked("Broker-priced target does not cover the configured net reward",
+                      code="target_calculation", details=details | {"net_gain_per_order": gain})
+    return request, loss, margin, details | {"net_gain_per_order": gain,
+        "net_reward_risk": gain/loss, "target_adjusted_for_costs": request["tp"] != original_target}
+
+
 def request_plan(bridge, account, guard, spec, risk, side, atr, lot, count, fraction):
     if type(count) is not int or not 1 <= count <= 10 or type(side) is not int or side not in (-1, 1):
         raise ValueError("Choose BUY/SELL and 1..10 orders")
@@ -67,15 +106,22 @@ def request_plan(bridge, account, guard, spec, risk, side, atr, lot, count, frac
     # the broker's minimum closing-quote distance. Each order retains SL/TP.
     distance = max(.45*atr, 4.1*spread, info.trade_stops_level*info.point+spread+spec.tick_size)
     entry = tick.ask if side > 0 else tick.bid
-    request = bridge.request(spec.symbol, side, atr, spec, risk, account,
-                             structural_stop=entry-side*distance, fixed_volume=lot)
+    try:
+        request = bridge.request(spec.symbol, side, atr, spec, risk, account,
+                                 structural_stop=entry-side*distance, fixed_volume=lot)
+    except Blocked as error:
+        error.details = {"stage": "local_risk_check", "atr": atr, "spread": spread,
+                         "requested_orders": count, "requested_lot": lot, **(error.details or {})}
+        raise
     if request["type_filling"] not in (bridge.api.ORDER_FILLING_FOK, bridge.api.ORDER_FILLING_IOC):
         raise Blocked("Baskets require FOK or IOC; unfilled volume must not remain pending")
-    loss, gain, margin = order_cost(bridge, request, spec)
-    if gain < loss:
-        raise Blocked("Scalp target does not cover stop risk after configured costs")
-    detail = budget_check(account, guard, risk, loss*count, margin*count, count, fraction)
-    return request, detail | {"lot": lot, "total_lots": lot*count, "loss_per_order": loss,
+    request, loss, margin, target_detail = costed_target(bridge, request, spec, risk, atr)
+    try:
+        detail = budget_check(account, guard, risk, loss*count, margin*count, count, fraction)
+    except Blocked as error:
+        error.details = target_detail | (error.details or {})
+        raise
+    return request, target_detail | detail | {"lot": lot, "total_lots": lot*count, "loss_per_order": loss,
                               "margin_per_order": margin, "sl": request["sl"], "tp": request["tp"]}
 
 
@@ -154,7 +200,9 @@ def validate_child(bridge, memory, basket_id, key, request, account, positions, 
     if used_margin+remaining*max(margin, group["plan"]["margin_per_order"]) > group["plan"]["margin_budget_cash"]+1e-8:
         raise Blocked("Repriced basket exceeds its original aggregate margin budget")
     if loss > account.equity*risk.fraction+1e-8 or gain < loss:
-        raise Blocked("Repriced child exceeds risk or net reward constraints")
+        raise Blocked("Repriced child exceeds risk or net reward constraints", code="repriced_child_budget",
+                      details={"loss_per_order": loss, "net_gain_per_order": gain,
+                               "risk_budget_cash": account.equity*risk.fraction, "currency": account.currency})
     budget_check(account, guard, risk, committed+remaining*max(loss, group["plan"]["loss_per_order"]),
                  remaining*max(margin, group["plan"]["margin_per_order"]), remaining, group["fraction"])
 
@@ -179,7 +227,8 @@ def submit_basket(bridge, memory, account, meta, digest, guard, side, atr, lot, 
         check = bridge.api.order_check(request)
         details = {"retcode": getattr(check, "retcode", None), "comment": getattr(check, "comment", "No response")}
         return {"action": "CHECK", "status": "checked" if details["retcode"] == 0 else "rejected",
-                "orders_sent": 0, "plan": plan, "broker": details, "reason": "manual_order_check"}
+                "orders_sent": 0, "plan": plan, "broker": details, "broker_contacted": True,
+                "reason": "manual_order_check"}
     if not options["execute"]:
         return {"action": "BUY" if side > 0 else "SELL", "status": "dry_run", "orders_sent": 0, "plan": plan}
     gid = str(uuid.uuid4())
@@ -368,6 +417,7 @@ def execution_step(bridge, model_path, memory, expected_login, calendar=None, ex
         history.clear()
         pressure = None
     if group:
+        bridge.neural_status = {"phase": "managing_positions", "reason": "Open-basket exits take priority over new neural input"}
         result = manage_group(bridge, memory, group, account, guard, options, kill_file, pressure)
         bridge.scalp_status = (getattr(bridge, "scalp_status", None) or {}) | {
             "symbol": group["symbol"], "style": "micro" if not group["manual"] else cfg.style,
@@ -381,6 +431,7 @@ def execution_step(bridge, model_path, memory, expected_login, calendar=None, ex
     if manual and (now > manual["expires_at"] or cancelled()):
         raise Blocked("Manual intent expired or was cancelled; no order sent")
     if Path(kill_file).exists() or (not manual and (not entries_enabled or cancelled())):
+        bridge.neural_status = {"phase": "paused", "reason": "entries_paused"}
         return {"action": "WAIT", "reason": "entries_paused"}
     if not bridge.clock.compatible(meta["time_basis"]["broker_clock"]):
         raise Blocked("Profile and broker clock policies differ")
@@ -392,6 +443,7 @@ def execution_step(bridge, model_path, memory, expected_login, calendar=None, ex
     cache = getattr(bridge, "_micro_context", {})
     context = cache.get(digest)
     if context is None or int(context["closed_at"]//60) != int(now//60):
+        bridge.neural_status = {"phase": "waiting_for_data", "reason": "Waiting for fresh, contiguous M1 bars"}
         bars = bridge.bars(spec, 500)
         market = closed_bar_status(bars.time[-1], 60, time.time())
         if bars.synthetic or len(bars.time) != 500 or not market["ready"] or np.any(np.diff(bars.time[-20:]) != 60):
@@ -414,6 +466,7 @@ def execution_step(bridge, model_path, memory, expected_login, calendar=None, ex
             "account_has_exposure" if positions or pending else ""))
     bridge.scalp_status["entry_gate"] = gate
     if gate and not manual:
+        bridge.neural_status = {"phase": "entry_blocked", "reason": gate}
         result = {"action": "WAIT", "reason": gate}
         bridge.scalp_status["last_decision"] = result
         return result
@@ -421,6 +474,7 @@ def execution_step(bridge, model_path, memory, expected_login, calendar=None, ex
     decision = {"action": "WAIT", "reason": "micro_waiting_for_quote_momentum", "bar_closed_at": context["closed_at"]}
     vector = None
     if manual:
+        bridge.neural_status = {"phase": "manual_request", "reason": "Manual execution does not require a neural signal"}
         side, count, lot = manual["side"], manual["count"], manual["lot"]
         if not micro and count != 1:
             raise Blocked("Choose a Micro profile to send multiple orders")
@@ -428,14 +482,20 @@ def execution_step(bridge, model_path, memory, expected_login, calendar=None, ex
         deadline = manual["expires_at"]
     else:
         if context["encoded"] is None:
+            bridge.neural_status = {"phase": "warming_up", "reason": "Processing closed market bars"}
             if brain.last_time is not None and brain.last_time < context["bars"].time[0]:
                 brain.reset()
-            context["encoded"] = brain.observe(context["raw"], context["bars"].time)
+            context["encoded"] = brain.observe(context["raw"], context["bars"].time, max_bars=4)
+            ready = context["encoded"] is not None
+            bridge.neural_status = {"phase": "waiting_for_ticks" if ready else "warming_up",
+                                   "reason": "neural_context_updated_waiting_for_fresh_ticks" if ready else "neural_warmup",
+                                   **getattr(brain, "observation_progress", {})}
             # Initial graph warmup must never turn an old impulse into an entry.
             history.clear()
-            decision["reason"] = "neural_context_updated_waiting_for_fresh_ticks"
+            decision["reason"] = bridge.neural_status["reason"]
             bridge.scalp_status["last_decision"] = decision
             return decision
+        bridge.neural_status = {"phase": "waiting_for_ticks", "reason": "micro_waiting_for_quote_momentum"}
         if pressure is None or time.time()-pressure["time"] > 2:
             bridge.scalp_status["last_decision"] = decision
             return decision
