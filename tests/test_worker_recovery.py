@@ -160,6 +160,17 @@ class WorkerStartupTests(unittest.TestCase):
         self.assertEqual(result['details']['risk_cash'],3)
         self.assertEqual(result['orders_sent'],0)
         self.assertEqual(self.w.bridge.api.calls,0)
+        # The second UI read QUEUED while the first worker owned the lease.
+        # Starting it later must load the final receipt, not leave buttons pending.
+        other.bridge=self.w.bridge;other.config.update(login=123,server='test')
+        other.account_data={'login':123,'server':'test','mode':'demo'}
+        with patch.object(other,'refresh_account'),patch('fxb.basket_runtime.execution_step',return_value={'action':'WAIT','reason':'test'}):
+            try:
+                other.start(['runs/test/model.npz'],'demo')
+                self.assertEqual(other.manual_result['status'],'blocked')
+                self.assertEqual(other.manual_result['details']['risk_cash'],3)
+            finally:
+                other.stop();other.worker.join(5)
 
 
 class IncrementalBrainTests(unittest.TestCase):

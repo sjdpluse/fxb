@@ -67,9 +67,7 @@ class Workstation:
             if self.manual_result and self.manual_result.get("status") in ("queued", "processing"):
                 try:
                     with WorkerLock(self.db_path):
-                        self.manual_result.update(status="interrupted", reason="Worker restarted; inspect broker history. No automatic replay.")
-                        memory.put_state("manual:"+self.manual_result["request_id"], self.manual_result)
-                        memory.put_state("manual-last", self.manual_result)
+                        self.recover_manual(memory)
                 except Blocked:
                     pass  # A second UI must not rewrite an active worker's intent.
         finally:
@@ -79,6 +77,17 @@ class Workstation:
         path = self.state_dir / "workstation.json"
         if path.exists():
             self.config.update(json.loads(path.read_text(encoding="utf-8-sig")))
+
+    def recover_manual(self, memory):
+        """Caller holds WorkerLock; re-read so another UI cannot overwrite a receipt."""
+        current = memory.get_state("manual-last")
+        if current and current.get("status") in ("queued", "processing"):
+            current = current | {"status": "interrupted",
+                                 "reason": "Worker restarted; inspect broker history. No automatic replay."}
+            memory.put_state("manual:"+current["request_id"], current)
+            memory.put_state("manual-last", current)
+        self.manual_result = current
+        self.manual_pending = None
 
     def note(self, message, level="info", **extra):
         with self.lock:
@@ -478,6 +487,7 @@ class Workstation:
                 group = memory.get_state("basket:"+gid) if gid else None
                 if group and (len(paths) != 1 or sha256(paths[0]) != group["digest"]):
                     raise Blocked("Restart the basket's original profile to finish management and reconciliation")
+                self.recover_manual(memory)
             finally:
                 memory.close()
             return self._start_worker(paths, metas, mode, broker_mode, acknowledged_login, hours, lease)
