@@ -44,13 +44,18 @@ def parser():
     c = commands.add_parser("scalp-prepare", help="Prepare the gold M1 online profile from 500 recent closed bars; sends no orders")
     c.add_argument("--root", default=".")
     c.add_argument("--symbol", default="XAUUSD.m")
-    c.add_argument("--style", choices=["structure", "active"], default="structure")
+    c.add_argument("--style", choices=["structure", "active", "micro"], default="structure")
     c.add_argument("--risk-percent", type=float)
     c.add_argument("--max-trades", type=int)
     c.add_argument("--daily-loss-percent", type=float)
     c.add_argument("--commission", type=float, required=True)
     c.add_argument("--slippage-points", type=float, required=True)
     c.add_argument("--overnight-cost", type=float, required=True)
+    c.add_argument("--sizing-mode", choices=["fixed", "capacity"], default="capacity")
+    c.add_argument("--hold-minutes", type=int, default=5)
+    c = commands.add_parser("scalp-upgrade", help="Upgrade an existing Micro profile, retaining learned rewards; sends no orders")
+    c.add_argument("--root", default=".")
+    c.add_argument("--model", required=True)
     c = commands.add_parser("synth", help="Generate clearly labelled synthetic test bars")
     c.add_argument("--out", required=True)
     c.add_argument("--bars", type=int, default=2400)
@@ -178,20 +183,27 @@ def run(args):
                     temporary.unlink(missing_ok=True)
         return {"status": "saved", "broker_clock": clock.config(), "backup": str(backup),
                 "orders_sent": 0, "restart_workstation": True}
+    if args.command == "scalp-upgrade":
+        from .workstation import Workstation
+        return Workstation(args.root).upgrade_micro(args.model)
     if args.command == "scalp-prepare":
         from .workstation import Workstation
         from .scalper_runtime import create_profile
         from .scalping import scalp_config, scalp_risk
+        from .micro_scalping import MicroConfig
         config = scalp_config(args.style)
         risk = scalp_risk(args.style, None if args.risk_percent is None else args.risk_percent/100,
-                          args.max_trades, None if args.daily_loss_percent is None else args.daily_loss_percent/100)
+                          (0 if args.style == "micro" else None) if args.max_trades is None else args.max_trades,
+                          None if args.daily_loss_percent is None else args.daily_loss_percent/100,
+                          args.hold_minutes if args.style == "micro" else None)
+        micro = MicroConfig(sizing_mode=args.sizing_mode, exit_policy="confirmed") if args.style == "micro" else None
         controller = Workstation(args.root)
         try:
             with WorkerLock(controller.db_path):
                 controller.connect()
                 output = controller.root / "runs" / f"gold-M1-{args.style}-{time.time_ns()}"
                 result = create_profile(controller.bridge, args.symbol, output, args.commission,
-                                        args.slippage_points, args.overnight_cost, config, risk)
+                                        args.slippage_points, args.overnight_cost, config, risk, micro)
                 result["model"] = str(Path(result["model"]).relative_to(controller.root))
                 return result
         finally:

@@ -42,12 +42,19 @@ class BrowserTests(unittest.TestCase):
                         self.assertEqual(page.locator('#scalp-style').input_value(),"micro")
                         self.assertTrue(page.locator('#micro-fields').is_visible())
                         self.assertEqual(page.locator('#scalp-form [name="basket_orders"]').input_value(),"5")
-                        self.assertEqual(page.locator('#scalp-form [name="max_trades"]').input_value(),"250")
+                        self.assertEqual(page.locator('#scalp-form [name="max_trades"]').input_value(),"0")
+                        self.assertEqual(page.locator('#scalp-form [name="sizing_mode"]').input_value(),"capacity")
+                        self.assertTrue(page.locator('#scalp-form [name="basket_orders"]').is_disabled())
+                        self.assertEqual(page.locator('#scalp-form [name="hold_minutes"]').input_value(),"5")
+                        page.locator('#scalp-form [name="sizing_mode"]').select_option('fixed')
+                        self.assertTrue(page.locator('#scalp-form [name="basket_orders"]').is_enabled())
                         page.locator('#scalp-style').select_option('structure')
                         self.assertTrue(page.locator('#scalp-form [name="risk_percent"]').is_disabled())
                         page.locator('#scalp-style').select_option('active')
                         self.assertTrue(page.locator('#scalp-form [name="risk_percent"]').is_enabled())
                         self.assertFalse(page.locator('#micro-fields').is_visible())
+                        self.assertFalse(page.locator('#micro-exit-fields').is_visible())
+                        self.assertEqual(page.locator('#scalp-form [name="max_trades"]').input_value(),"250")
                         page.locator('[data-page="execution"]').click()
                         self.assertTrue(page.locator("#scalp-status").is_visible())
                         self.assertTrue(page.locator("#market-data-status").is_visible())
@@ -108,6 +115,29 @@ class BrowserTests(unittest.TestCase):
                         expect(page.locator('#demo-session-review')).to_be_hidden()
                         expect(page.locator('#engine-state')).to_have_text('STANDBY')
                         self.assertEqual(resets,[{'token':review['token'],'acknowledged_login':123}])
+                        self.assertEqual(starts,[])
+                        old={'path':'runs/old/model.npz','name':'old','symbol':'XAUUSD.m',
+                             'encoder':'scalp-full-brain','synthetic':False,'strategy':'gold-m1-micro-v1',
+                             'scalp_style':'micro','risk':{'fraction':.005,'max_trades':250}}
+                        updated=old|{'path':'runs/upgraded/model.npz','name':'upgraded',
+                            'risk':{'fraction':.005,'max_trades':0},
+                            'micro_config':{'sizing_mode':'capacity','exit_policy':'confirmed'}}
+                        status['models']=[old]
+                        expect(page.locator('[name=models]')).to_have_count(1)
+                        page.locator('[name=models]').check()
+                        upgrades=[]
+                        def upgrade_response(route):
+                            upgrades.append(route.request.post_data_json)
+                            status['models']=[old,updated]
+                            route.fulfill(status=200,content_type='application/json',body=json.dumps(
+                                {'status':'upgraded','model':updated['path'],'learning_preserved':True,'orders_sent':0}))
+                        page.route('**/api/scalper/upgrade',upgrade_response)
+                        page.locator('#micro-upgrade-button').click()
+                        expect(page.locator('[name=models]').nth(1)).to_be_checked()
+                        expect(page.locator('[name=models]').nth(0)).not_to_be_checked()
+                        expect(page.locator('#micro-upgrade-note')).to_contain_text('تجربه‌های همان حساب حفظ شده‌اند')
+                        expect(page.locator('#model-choices')).to_contain_text('∞/day · AUTO · PATIENT')
+                        self.assertEqual(upgrades,[{'model':old['path']}])
                         self.assertEqual(starts,[])
                         status['account']['mode']='live'
                         expect(page.locator('#demo-session-panel')).to_be_hidden()

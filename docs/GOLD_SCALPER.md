@@ -1,4 +1,4 @@
-# Gold M1 scalper — 0.5.2
+# Gold M1 scalper — 0.6.0
 
 ## Micro baskets and manual orders
 
@@ -20,17 +20,27 @@ three seconds; graph warmup clears tick history and waits for a fresh signal.
 This measures quote momentum, not exchange volume/order-flow, and does not
 promise to capture every fluctuation or provide low-latency HFT execution.
 
-Choose **5..10 orders**, each **0.01 or 0.02 lot**. Multiple tickets require a
-hedging account (`ACCOUNT_MARGIN_MODE_RETAIL_HEDGING`); runtime rechecks this.
-One basket at a time is allowed. Default aggregate stop-risk allowance is 2.5%
-of equity, subject to the selected per-order limit (default 0.5%), remaining
-daily loss allowance (default 3%), persistent 8% drawdown floor, 20% margin
-budget and daily entry quota (default 250 individual orders, not 250 baskets).
-There is no silent reduction of the requested count or rounding lots upward.
-The full proposed basket must fit before the first send; each later child is
-repriced and checked against the remaining and original aggregate budgets.
-These allowances are configurable caps, not a suitability recommendation.
-Stops, slippage, gaps and delayed broker replies can still produce larger losses.
+New Micro profiles default to **capacity sizing** and **no daily count cap**
+(`max_trades=0`). A positive count still selects an optional daily quota. Capacity
+is the integer minimum of remaining aggregate stop-risk allowance, free-margin
+budget and the broker's declared directional volume allowance, at **0.01 or
+0.02 lot per order**. There is no fixed ten-order cap in capacity mode. Fixed mode
+retains an explicit 5..10 count; manual checks/sends retain their explicit 1..10
+count. More orders are not additional independent opportunities or learning samples.
+
+Multiple tickets require a hedging account; one basket at a time is allowed.
+Default aggregate stop risk is 2.5% of equity, per-order risk 0.5%, daily loss 3%,
+persistent maximum drawdown 8%, and aggregate margin budget 20% of free margin.
+Capacity mode uses the largest count fitting **all** these limits, not all raw
+free margin. Per-order volume is never rounded upward. Fixed/manual counts are
+not silently reduced. The proposal must fit before the first send; each later
+child is checked against current equity, free margin, directional volume and
+original aggregate budgets. A sibling that closes cancels remaining entries.
+`ACCOUNT_LIMIT_ORDERS` limits pending orders, not market-position counts.
+Undeclared broker limits and changing requirements are still enforced by actual
+`order_check` / order-send retcodes. See the official [symbol volume rules](https://www.mql5.com/en/docs/constants/environment_state/marketinfoconstants)
+and [margin-estimation semantics](https://www.mql5.com/en/docs/python_metatrader5/mt5ordercalcmargin_py).
+Stops, gaps and delayed replies can produce losses beyond estimates.
 
 Children are submitted sequentially, with a durable unique order claim each.
 Every position receives broker SL/TP. Only FOK/IOC filling is supported for
@@ -50,16 +60,59 @@ repeated. A restart resumes management with the original profile, never the
 unsubmitted portion of a basket. IDs are linked through deal history/comments,
 not by assuming order and position ticket numbers are equal.
 
-The exit latches when estimated basket liquidation profit remains positive and
-favorable quote velocity fades below 30% of its observed peak, or more than 40%
-of protected peak profit is given back, sustained for a second on fresh samples.
-Net estimation includes closed siblings, broker-booked fees, open floating
-profit/swap, and estimated exit commission/slippage. Broker history is required
-for that profit estimate. Attached stops, maximum two-minute hold, equity halts
-and operator flatten work independently of the neural/news/history entry path.
-A basket contributes **one** learning reward after all confirmed children close,
-using actual linked net cash flow divided by recorded stop risk. Manually chosen
-orders and externally modified positions are excluded from policy learning.
+New/upgraded profiles use **confirmed** profit protection:
+
+- Default minimum hold is 20 seconds from the first fill. Protection arms only
+  after net basket profit reaches the larger of 0.5 times original filled stop
+  risk (0.5R), three cash ticks or the cash noise allowance.
+- A giveback must exceed **all** of 35% of peak net profit, 0.15R and the noise
+  allowance (the larger of two current spreads and 0.10 entry ATR, converted to
+  cash for the open volume). Favorable velocity must also fall below 30% of peak.
+- Both conditions must persist on fresh, distinct samples for three seconds;
+  gaps reset confirmation. Barely positive profit or a small price wiggle does
+  not qualify. The basket must still have positive estimated liquidation net.
+- Defaults are configurable hold/confirmation times, with a five-minute maximum
+  holding time (1..15 selectable). Attached SL/TP, missing-protection exits,
+  account risk halts and operator flatten remain immediate and independent.
+  Stops are never widened by this policy. Exit reasons identify time, risk,
+  operator stop or profit protection separately.
+
+Net estimation includes closed siblings, booked fees, open profit/swap and
+estimated exit commission/slippage. History is required for profit protection,
+but never for emergency exits. Existing profiles/baskets without the new fields
+retain the old one-second fade policy and their original maximum holding time.
+
+A completely closed autonomous basket supplies **one** reward: actual linked
+`profit + commission + swap + fee`, divided by the original filled stop risk.
+Eight entry-time tick features now accompany the existing 19 market + 64 neural
+features and direction/setup context. Positive/negative net outcomes update a
+bounded prediction of R; this changes future entry scores and can block losing
+contexts. The reward event, prediction before/after, weight-change magnitude,
+revision and weights commit in one SQLite transaction. Replays cannot train twice;
+Supabase's outbox, when configured, receives the committed reward audit. Training
+uses neither floating outcomes nor manual/external interventions. Biological
+synapses remain fixed; this is an adaptive readout, not a pretrained trading brain.
+
+## Upgrading a Micro profile without losing learning
+
+Stop the worker and select the **same Micro profile that placed the trades** in
+Execution. Click **ارتقای Micro انتخاب‌شده با حفظ یادگیری**. The result is a new
+profile with unlimited daily count, capacity sizing and the patient exit defaults;
+the UI selects it, but does not start execution. The old file stays untouched.
+The new profile retains its parent's learning lineage; server, login and actual
+DEMO/LIVE mode still scope the memory separately. Existing 86 weights keep their
+meaning and the added eight weights begin at zero. Repeated upgrades keep the
+same lineage. Guards, history, entry counts and STOP are never cleared. Existing
+open baskets continue under their frozen original policy and can settle into the
+same learning lineage. Live activation must be renewed for the new file hash.
+Creating a brand-new profile through the preparation form intentionally starts a
+separate learner. No long historical training is required for an upgrade.
+
+CLI alternative (FXB stopped):
+
+```powershell
+.\.venv\Scripts\python.exe -m fxb scalp-upgrade --root . --model 'runs\YOUR-EXISTING-MICRO\model.npz'
+```
 
 In **Execution**, use the new manual panel with the selected M1 worker running:
 

@@ -20,6 +20,7 @@ FEATURES = ["return_1_atr", "return_3_atr", "body_atr", "upper_wick_atr",
             "fvg_width_atr", "spread_atr", "relative_tick_volume", "closed_m5_bias",
             "premium_discount"]
 READOUT_DIM = 86  # 19 engineered + 64 neural + direction + setup type + bias
+TICK_DIM = 8  # Added head; the original 86 weights retain their meaning.
 
 
 @dataclass(frozen=True)
@@ -65,20 +66,24 @@ def scalp_config(style="structure"):
     return ScalpConfig(style=style)
 
 
-def scalp_risk(style="structure", fraction=None, max_trades=None, daily_loss=None):
+def scalp_risk(style="structure", fraction=None, max_trades=None, daily_loss=None, hold_minutes=None):
     if style not in ("structure", "active", "micro"):
         raise ValueError("Unknown scalper style")
     active = style in ("active", "micro")
     fraction = (.005 if active else .001) if fraction is None else fraction
     max_trades = (250 if active else 40) if max_trades is None else max_trades
     daily_loss = (.03 if active else .01) if daily_loss is None else daily_loss
-    if (not .001 <= fraction <= .01 or type(max_trades) is not int or not 1 <= max_trades <= 250
+    hold_minutes = (2 if active else 5) if hold_minutes is None else hold_minutes
+    valid_count = type(max_trades) is int and (max_trades >= 0 if style == "micro" else 1 <= max_trades <= 250)
+    if (not .001 <= fraction <= .01 or not valid_count
             or not .01 <= daily_loss <= .05
+            or type(hold_minutes) is not int or not 1 <= hold_minutes <= 15
+            or (style != "micro" and hold_minutes != (2 if active else 5))
             or (not active and (fraction, max_trades, daily_loss) != (.001, 40, .01))):
-        raise ValueError("Active limits: risk 0.1..1%, daily loss 1..5%, at most 250 entries")
+        raise ValueError("Risk 0.1..1%, daily loss 1..5%; Micro count 0 means unlimited, hold 1..15 minutes")
     return Risk(fraction=fraction, daily_loss=daily_loss, max_drawdown=.08 if active else .05,
                 max_trades=max_trades, stop_atr=1, reward_risk=1.5,
-                max_hold_bars=2 if active else 5, max_spread_atr=.25 if active else .20,
+                max_hold_bars=hold_minutes, max_spread_atr=.25 if active else .20,
                 margin_fraction=.20)
 
 
@@ -193,17 +198,47 @@ def readout_context(embedding, signal):
     return np.r_[np.tanh(embedding / 4), signal["side"], kind, 1.0]
 
 
+def micro_readout_context(embedding, signal, atr):
+    """Entry-time quote conditions accompany the neural context in the reward sample."""
+    p, side = signal["pressure"], signal["side"]
+    if not math.isfinite(atr) or atr <= 0:
+        raise ValueError("Positive ATR is required for the tick learning context")
+    move = max(abs(p["movement"]), 1e-12)
+    tick = [side*p["movement"]/atr, side*p["velocity"]/atr, side*p["imbalance"],
+            p["spread"]/atr, p["spread"]/move, p["duration"]/8,
+            side*p["velocity"]*p["duration"]/move, p["samples"]/64]
+    if not np.isfinite(tick).all():
+        raise ValueError("Invalid tick learning context")
+    return np.r_[readout_context(embedding, signal), np.tanh(tick)]
+
+
 def learning_state(memory, scope):
     value = memory.get_state("scalp-learning:" + scope, {})
     return {"weights": [0.] * READOUT_DIM, "samples": 0, "wins": 0, "losses": 0,
+            "tick_weights": [0.] * TICK_DIM, "revision": value.get("samples", 0), "last_reward_r": None,
+            "last_weight_delta": 0.,
             "net_cashflow": 0., "sum_r": 0., "loss_streak": 0, "last_exit": 0., **value}
 
 
-def entry_score(state, vector, base, config):
-    weights = np.asarray(state["weights"], dtype=float)
-    if (weights.shape != (READOUT_DIM,) or not np.isfinite(weights).all()
+def learning_arrays(state, vector, config):
+    original = np.asarray(state["weights"], dtype=float)
+    extra = np.asarray(state.get("tick_weights", [0.] * TICK_DIM), dtype=float)
+    vector = np.asarray(vector, dtype=float)
+    if original.shape != (READOUT_DIM,) or extra.shape != (TICK_DIM,):
+        raise ValueError("Invalid online readout dimensions")
+    weights = np.r_[original, extra]
+    if (not np.isfinite(weights).all()
             or np.linalg.norm(weights) > config.max_weight_norm + 1e-8):
         raise ValueError("Invalid or out-of-bounds online readout")
+    if vector.shape == (READOUT_DIM,):
+        vector = np.r_[vector, np.zeros(TICK_DIM)]
+    if vector.shape != (READOUT_DIM+TICK_DIM,) or not np.isfinite(vector).all():
+        raise ValueError("Invalid learning context dimensions")
+    return weights, vector
+
+
+def entry_score(state, vector, base, config):
+    weights, vector = learning_arrays(state, vector, config)
     adjustment = config.max_adaptation * float(np.tanh(weights @ vector))
     return float(base + adjustment), adjustment
 
@@ -213,7 +248,7 @@ def learn_closed(memory, scope, position_id, symbol, vector, net_cashflow, risk_
     """Commit event + weight update together. Replaying a deal cannot learn twice."""
     cfg = config or ScalpConfig()
     vector = np.asarray(vector, dtype=float)
-    if (vector.shape != (READOUT_DIM,) or not np.isfinite(vector).all()
+    if (vector.shape not in ((READOUT_DIM,), (READOUT_DIM+TICK_DIM,)) or not np.isfinite(vector).all()
             or not np.isfinite([net_cashflow, risk_cash, opened_at, closed_at, observed_at]).all()
             or risk_cash <= 0 or not opened_at <= closed_at <= observed_at):
         raise ValueError("Invalid settled-trade learning sample")
@@ -230,17 +265,29 @@ def learn_closed(memory, scope, position_id, symbol, vector, net_cashflow, risk_
         if cursor.rowcount == 0:
             return False
         state = learning_state(memory, scope)
-        entry_score(state, vector, 0, cfg)  # validate persisted weights
-        weights = np.asarray(state["weights"])
+        weights, vector = learning_arrays(state, vector, cfg)
+        previous = weights.copy()
+        prediction = float(weights @ vector)
         error = float(np.clip(np.clip(reward, -2, 2) - weights @ vector, -1, 1))
         weights = weights * .999 + cfg.learning_rate * error * vector / (1 + vector @ vector)
         norm = np.linalg.norm(weights)
         if norm > cfg.max_weight_norm: weights *= cfg.max_weight_norm / norm
-        state.update(weights=weights.tolist(), samples=state["samples"]+1,
+        delta = float(np.linalg.norm(weights-previous))
+        state.update(weights=weights[:READOUT_DIM].tolist(), tick_weights=weights[READOUT_DIM:].tolist(),
+                     revision=state.get("revision", state["samples"])+1,
+                     last_reward_r=reward, last_weight_delta=delta,
+                     last_prediction_before_r=prediction, last_prediction_after_r=float(weights @ vector),
+                     samples=state["samples"]+1,
                      wins=state["wins"]+int(net_cashflow > 0), losses=state["losses"]+int(net_cashflow < 0),
                      net_cashflow=state["net_cashflow"]+net_cashflow, sum_r=state["sum_r"]+reward,
                      loss_streak=state["loss_streak"]+1 if net_cashflow < 0 else 0,
                      last_exit=max(state["last_exit"], closed_at))
         memory.db.execute("INSERT INTO state VALUES(?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload",
                           ("scalp-learning:"+scope, json.dumps(state, allow_nan=False)))
+        memory.db.execute("UPDATE events SET payload=? WHERE id=?",
+            (json.dumps({"position_id": position_id, "net_cashflow": net_cashflow,
+                "risk_cash": risk_cash, "reward_r": reward, "closed_at": closed_at,
+                "state": vector.tolist(), "prediction_before_r": prediction,
+                "prediction_after_r": float(weights @ vector), "weight_delta_norm": delta,
+                "revision": state["revision"]}, allow_nan=False), event_id))
     return True

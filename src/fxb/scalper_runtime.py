@@ -1,10 +1,11 @@
 """M1 gold deployment, owned-position management and settled-deal learning."""
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
 import hashlib
 import json
 import math
+import re
 import time
 import numpy as np
 from .connectome import sha256
@@ -25,7 +26,7 @@ def create_profile(bridge, symbol, output, commission, slippage, overnight, conf
     from .fast_brain import FastWholeBrain
     cfg = config or ScalpConfig()
     risk = risk or scalp_risk(cfg.style)
-    if risk != scalp_risk(cfg.style, risk.fraction, risk.max_trades, risk.daily_loss):
+    if risk != scalp_risk(cfg.style, risk.fraction, risk.max_trades, risk.daily_loss, risk.max_hold_bars):
         raise ValueError("Unsupported scalper risk configuration")
     if not symbol or any(c in symbol for c in "/\\\0") or "XAU" not in symbol.upper():
         raise ValueError("Choose the broker's exact XAU gold symbol")
@@ -52,8 +53,11 @@ def create_profile(bridge, symbol, output, commission, slippage, overnight, conf
         micro = micro or MicroConfig()
         if micro.basket_risk > risk.daily_loss:
             raise ValueError("Basket risk cannot exceed the daily loss limit")
+        if micro.exit_policy == "confirmed" and micro.min_hold_seconds >= risk.max_hold_bars*60:
+            raise ValueError("Minimum protection hold must be shorter than maximum holding time")
         meta["micro_config"] = asdict(micro)
         meta["learning"] = "one_reward_per_fully_closed_autonomous_basket"
+        meta["learning_version"] = 2
     with (output / "model.npz").open("wb") as f:
         np.savez_compressed(f, meta=np.array(json.dumps(meta, allow_nan=False)))
     return {"model": str(output / "model.npz"), "symbol": symbol, "timeframe": "M1",
@@ -74,12 +78,17 @@ def policy(bridge, path):
         if (meta.get("strategy") != strategy_version(cfg.style)
                 or meta.get("features") != FEATURES
                 or meta["spec"]["timeframe_seconds"] != 60 or "XAU" not in meta["spec"]["symbol"].upper()
-                or risk != scalp_risk(cfg.style, risk.fraction, risk.max_trades, risk.daily_loss)):
+                or risk != scalp_risk(cfg.style, risk.fraction, risk.max_trades, risk.daily_loss, risk.max_hold_bars)):
             raise Blocked("Unsupported or changed M1 scalper profile")
         if cfg.style == "micro":
             micro = MicroConfig(**meta["micro_config"])
             if micro.basket_risk > risk.daily_loss:
                 raise Blocked("Basket risk exceeds daily limit")
+            if micro.exit_policy == "confirmed" and micro.min_hold_seconds >= risk.max_hold_bars*60:
+                raise Blocked("Invalid Micro holding interval")
+            validate_learning_key(meta)
+            if meta.get("learning_version", 1) not in (1, 2):
+                raise Blocked("Unknown Micro learning context version")
         brain = FastWholeBrain()
         if brain.provenance != meta["topology"]:
             raise Blocked("The scalper's connectome provenance changed; create a new profile")
@@ -89,8 +98,51 @@ def policy(bridge, path):
     return cache[stamp]
 
 
-def learning_scope(account, model_hash):
+def validate_learning_key(meta):
+    key = meta.get("learning_key")
+    if key is not None and (not isinstance(key, str) or re.fullmatch("[0-9a-f]{64}", key) is None):
+        raise ValueError("Invalid learning lineage identifier")
+
+
+def learning_scope(account, model_hash, meta=None):
+    if meta is not None:
+        validate_learning_key(meta)
+        model_hash = meta.get("learning_key", model_hash)
     return hashlib.sha256(f"{account.server}:{account.login}:{account.trade_mode}:{model_hash}".encode()).hexdigest()
+
+
+def upgrade_micro_profile(source, output):
+    """Create a separately activatable profile while retaining account-scoped learning.
+
+    No guard, historical record, original model or current basket is rewritten.
+    A live authorization remains bound to the old file hash until reactivated.
+    """
+    source, output = Path(source), Path(output)
+    with np.load(source, allow_pickle=False) as data:
+        meta = json.loads(str(data["meta"]))
+    cfg, risk, spec = ScalpConfig(**meta["scalp_config"]), Risk(**meta["risk"]), Spec(**meta["spec"])
+    if (cfg.style != "micro" or meta.get("strategy") != MICRO_VERSION or meta.get("synthetic") is not False
+            or meta.get("features") != FEATURES or spec.timeframe_seconds != 60 or "XAU" not in spec.symbol.upper()
+            or risk != scalp_risk(cfg.style, risk.fraction, risk.max_trades, risk.daily_loss, risk.max_hold_bars)):
+        raise ValueError("Choose an existing real-market Micro profile")
+    validate_learning_key(meta)
+    micro = MicroConfig(**meta["micro_config"])
+    if micro.basket_risk > risk.daily_loss:
+        raise ValueError("Basket risk exceeds daily limit")
+    parent = sha256(source)
+    new_risk = replace(risk, max_trades=0, max_hold_bars=5)
+    new_micro = replace(micro, sizing_mode="capacity", exit_policy="confirmed")
+    meta.update(risk=asdict(new_risk), micro_config=asdict(new_micro), learning_version=2,
+        learning_key=meta.get("learning_key", parent), parent_model_sha256=parent,
+        run_id=output.name, created_at=time.time(),
+        learning="one_reward_per_fully_closed_autonomous_basket_with_entry_tick_context")
+    output.mkdir(parents=True, exist_ok=False)
+    with (output/"model.npz").open("wb") as f:
+        np.savez_compressed(f, meta=np.array(json.dumps(meta, allow_nan=False)))
+    return {"status": "upgraded", "model": str(output/"model.npz"), "parent_model_sha256": parent,
+            "learning_key": meta["learning_key"], "learning_preserved": True,
+            "risk": meta["risk"], "micro_config": meta["micro_config"],
+            "orders_sent": 0, "requires_activation": True}
 
 
 def decision_stats(memory, scope, decision, now):

@@ -152,7 +152,12 @@ def create_app(root=".", preview=False, token=None):
                     risk_percent=payload.get("risk_percent"), max_trades=payload.get("max_trades"),
                     daily_loss_percent=payload.get("daily_loss_percent"),
                     basket_orders=payload.get("basket_orders", 5), basket_lot=payload.get("basket_lot", .01),
-                    basket_risk_percent=payload.get("basket_risk_percent", 2.5))
+                    basket_risk_percent=payload.get("basket_risk_percent", 2.5),
+                    sizing_mode=payload.get("sizing_mode", "capacity"), hold_minutes=payload.get("hold_minutes", 5),
+                    min_hold_seconds=payload.get("min_hold_seconds", 20),
+                    confirmation_seconds=payload.get("confirmation_seconds", 3))
+            if action == "scalper/upgrade":
+                return controller.upgrade_micro(payload["model"])
             if action == "execution/manual":
                 return controller.manual_order(payload["request_id"], payload["side"], payload["lot"],
                                                payload.get("count", 1), payload.get("check_only", True))

@@ -301,7 +301,7 @@ class BasketTests(unittest.TestCase):
         self.step()
         self.assertEqual(self.api.calls,5)
         self.assertEqual(self.api.open_positions,[])
-        self.assertEqual(self.step()['reason'],'basket_time_risk_or_stop')
+        self.assertEqual(self.step()['reason'],'operator_stop')
         self.assertEqual(self.api.calls,5)
 
     def test_partial_fill_cancels_rest_and_manage_exact_filled_volume(self):

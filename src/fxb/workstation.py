@@ -373,7 +373,9 @@ class Workstation:
 
     def prepare_scalper(self, symbol, commission, slippage, overnight, style="structure",
                         risk_percent=None, max_trades=None, daily_loss_percent=None,
-                        basket_orders=5, basket_lot=.01, basket_risk_percent=2.5):
+                        basket_orders=5, basket_lot=.01, basket_risk_percent=2.5,
+                        sizing_mode="capacity", hold_minutes=5, min_hold_seconds=20,
+                        confirmation_seconds=3):
         from .scalper_runtime import create_profile
         from .scalping import scalp_config, scalp_risk
         if self.preview or self.bridge is None:
@@ -385,11 +387,17 @@ class Workstation:
             raise ValueError("Risk percentages must be numbers")
         config = scalp_config(style)
         risk = scalp_risk(style, None if risk_percent is None else risk_percent/100,
-                          max_trades, None if daily_loss_percent is None else daily_loss_percent/100)
+                          (0 if style == "micro" else None) if max_trades is None else max_trades,
+                          None if daily_loss_percent is None else daily_loss_percent/100,
+                          hold_minutes if style == "micro" else None)
         from .micro_scalping import MicroConfig
         if type(basket_risk_percent) not in (int, float):
             raise ValueError("Basket risk percentage must be a number")
-        micro = MicroConfig(basket_orders, basket_lot, basket_risk_percent/100) if style == "micro" else None
+        micro = MicroConfig(basket_orders, basket_lot, basket_risk_percent/100,
+            sizing_mode=sizing_mode, exit_policy="confirmed", min_hold_seconds=min_hold_seconds,
+            confirmation_seconds=confirmation_seconds) if style == "micro" else None
+        if micro and micro.min_hold_seconds >= risk.max_hold_bars*60:
+            raise ValueError("Minimum protection hold must be shorter than maximum holding time")
         if micro and micro.basket_risk > risk.daily_loss:
             raise ValueError("Basket risk cannot exceed daily loss limit")
         safe_symbol = re.sub(r"[^a-zA-Z0-9_.-]", "_", symbol)
@@ -401,6 +409,19 @@ class Workstation:
             result["model"] = str(Path(result["model"]).relative_to(self.root))
             return result
         return self.launch_job("scalp_prepare", work)
+
+    def upgrade_micro(self, model):
+        from .scalper_runtime import upgrade_micro_profile
+        with self.lock:
+            if self.preview or (self.worker and self.worker.is_alive()) or self.job.get("status") == "running":
+                raise Blocked("Stop execution and finish the current job before upgrading a Micro profile")
+            source = self.resolve(model, "runs")
+            with WorkerLock(self.db_path):
+                output = self.root / "runs" / f"gold-M1-micro-upgraded-{time.time_ns()}"
+                result = upgrade_micro_profile(source, output)
+            result["model"] = str(Path(result["model"]).relative_to(self.root))
+            self.note("Micro profile upgraded; existing account-scoped learning retained", model=result["model"])
+            return result
 
     def manual_order(self, request_id, side, lot, count=1, check_only=True):
         """At most one queued intent; repeated IDs cannot create another trade."""

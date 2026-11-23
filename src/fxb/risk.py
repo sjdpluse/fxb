@@ -18,7 +18,8 @@ class Risk:
 
     def __post_init__(self):
         values = asdict(self)
-        if not all(math.isfinite(v) and v > 0 for v in values.values()):
+        if not all(math.isfinite(v) and (v >= 0 if k == "max_trades" else v > 0)
+                   for k, v in values.items()):
             raise ValueError("Risk values must be finite and positive")
         if not 0 < self.fraction <= 0.01:
             raise ValueError("Per-trade risk must be at most 1%")
@@ -124,6 +125,6 @@ class Guard:
             return "maximum_drawdown"
         if self.daily_halt:
             return "daily_loss"
-        if self.entries >= risk.max_trades:
+        if risk.max_trades and self.entries >= risk.max_trades:
             return "daily_trade_limit"
         return ""

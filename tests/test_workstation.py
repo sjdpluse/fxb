@@ -44,7 +44,7 @@ class WorkstationTests(unittest.TestCase):
     def test_preview_has_no_account_or_trading_authority(self):
         with TestClient(create_app(self.root, preview=True, token=self.token)) as client:
             self.assertEqual(client.get("/api/status").status_code, 200)
-            for endpoint in ("execution/start", "account/configure", "data/export", "memory/sync", "calendar/save", "calendar/auto", "training/start", "scalper/prepare"):
+            for endpoint in ("execution/start", "account/configure", "data/export", "memory/sync", "calendar/save", "calendar/auto", "training/start", "scalper/prepare", "scalper/upgrade"):
                 with self.subTest(endpoint=endpoint):
                     self.assertEqual(client.post("/api/" + endpoint, json={}).status_code, 403)
 
@@ -84,6 +84,30 @@ class WorkstationTests(unittest.TestCase):
         self.assertEqual(len(models),1)
         self.assertEqual(models[0]["timeframe_seconds"],60)
         self.assertIsNone(models[0]["holdout"])
+
+    def test_micro_upgrade_route_preserves_source_and_leaves_worker_off(self):
+        import numpy as np
+        from dataclasses import asdict, replace
+        from fxb.scalping import FEATURES, scalp_risk, scalp_config
+        from fxb.micro_scalping import VERSION, MicroConfig
+        folder=self.root/'runs'/'micro';folder.mkdir(parents=True)
+        meta={'spec':asdict(replace(synthetic_bars(800).spec,symbol='XAUUSD.m',timeframe_seconds=60)),
+              'synthetic':False,'strategy':VERSION,'features':FEATURES,
+              'risk':asdict(scalp_risk('micro')),'scalp_config':asdict(scalp_config('micro')),
+              'micro_config':asdict(MicroConfig())}
+        source=folder/'model.npz';np.savez_compressed(source,meta=np.array(json.dumps(meta)))
+        original=source.read_bytes()
+        self.assertEqual(self.client.post('/api/scalper/upgrade',json={'model':'runs/micro/model.npz'}).status_code,401)
+        response=self.client.post('/api/scalper/upgrade',headers=self.headers,json={'model':'runs/micro/model.npz'})
+        self.assertEqual(response.status_code,200)
+        result=response.json()
+        self.assertEqual(result['risk']['max_trades'],0)
+        self.assertEqual(result['risk']['max_hold_bars'],5)
+        self.assertEqual(result['micro_config']['exit_policy'],'confirmed')
+        self.assertEqual(source.read_bytes(),original)
+        self.assertTrue((self.root/result['model']).is_file())
+        self.assertEqual(result['orders_sent'],0)
+        self.assertIsNone(self.app.state.controller.worker)
 
     def test_clock_configuration_rejects_half_supplied_bounds_without_saving(self):
         c = self.app.state.controller

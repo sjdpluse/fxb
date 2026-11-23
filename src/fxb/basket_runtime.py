@@ -15,7 +15,8 @@ import numpy as np
 from .data import KABUL, day_key
 from .risk import Spec, Risk, Guard, round_price
 from .mt5 import Blocked, MAGIC, NewsGate, closed_bar_status
-from .scalping import (ScalpConfig, analyze, readout_context, learning_state, entry_score, learn_closed)
+from .scalping import (ScalpConfig, analyze, readout_context, micro_readout_context,
+                      learning_state, entry_score, learn_closed)
 from .scalper_runtime import policy, learning_scope, scalp_cycle
 from .micro_scalping import MicroConfig, quote_pressure, micro_signal, weakening
 
@@ -47,11 +48,29 @@ def budget_check(account, guard, risk, risk_cash, margin_cash, count, fraction):
               "risk_budget_cash": max(0., available), "total_margin_cash": margin_cash,
               "margin_budget_cash": account.margin_free*risk.margin_fraction, "currency": account.currency}
     reason = guard.reason(risk)
-    if reason or guard.entries+count > risk.max_trades:
+    if reason or (risk.max_trades and guard.entries+count > risk.max_trades):
         raise Blocked(reason or "Basket exceeds remaining daily entry quota", code="basket_quota", details=detail)
     if risk_cash > available+1e-8 or margin_cash > account.margin_free*risk.margin_fraction+1e-8:
         raise Blocked("Entire requested basket exceeds risk or margin budget", code="basket_budget", details=detail)
     return detail
+
+
+def volume_capacity(info, side, lot, positions=(), pending=()):
+    """SYMBOL_VOLUME_LIMIT covers open + pending lots in one direction.
+
+    ACCOUNT_LIMIT_ORDERS only describes pending orders, not hedged positions.
+    An undeclared (zero) volume limit is not a promise that a broker will fill.
+    """
+    limit = float(getattr(info, "volume_limit", 0.))
+    if not math.isfinite(limit) or limit < 0:
+        raise Blocked("Invalid broker directional volume limit")
+    if not limit:
+        return None
+    direction = 0 if side > 0 else 1
+    used = sum(p.volume for p in positions if p.type == direction)
+    used += sum(p.volume_current for p in pending if p.type in
+                ((0, 2, 4, 6) if side > 0 else (1, 3, 5, 7)))
+    return max(0, math.floor((limit-used+1e-9)/lot))
 
 
 def costed_target(bridge, request, spec, risk, atr):
@@ -94,11 +113,12 @@ def costed_target(bridge, request, spec, risk, atr):
 
 
 def request_plan(bridge, account, guard, spec, risk, side, atr, lot, count, fraction):
-    if type(count) is not int or not 1 <= count <= 10 or type(side) is not int or side not in (-1, 1):
-        raise ValueError("Choose BUY/SELL and 1..10 orders")
+    # Zero is internal capacity sizing, never a request to submit zero orders.
+    if type(count) is not int or count < 0 or type(side) is not int or side not in (-1, 1):
+        raise ValueError("Choose BUY/SELL and a nonnegative integer order count")
     if type(lot) not in (int, float) or lot not in (.01, .02):
         raise ValueError("Choose 0.01 or 0.02 lot")
-    if count > 1 and getattr(account, "margin_mode", None) != 2:
+    if count != 1 and getattr(account, "margin_mode", None) != 2:
         raise Blocked("Separate basket positions require an MT5 hedging account")
     tick, info = bridge.tick(spec.symbol), bridge.symbol(spec.symbol)
     spread = tick.ask-tick.bid
@@ -114,22 +134,41 @@ def request_plan(bridge, account, guard, spec, risk, side, atr, lot, count, frac
                          "requested_orders": count, "requested_lot": lot, **(error.details or {})}
         if error.code == "fixed_lot_budget":
             loss = error.details["risk_cash"]
-            error.details.update(total_risk_cash=loss*count, basket_risk_budget_cash=account.equity*fraction,
+            error.details.update(total_risk_cash=loss*max(count, 1), basket_risk_budget_cash=account.equity*fraction,
                                  per_order_risk_percent=risk.fraction*100,
-                                 minimum_equity_for_selected_risk=max(loss/risk.fraction, loss*count/fraction),
+                                 minimum_equity_for_selected_risk=max(loss/risk.fraction, loss*max(count, 1)/fraction),
                                  minimum_equity_assumes_no_existing_risk_halt=True,
-                                 total_margin_cash=error.details["margin_cash"]*count,
+                                 total_margin_cash=error.details["margin_cash"]*max(count, 1),
                                  margin_budget_cash=account.margin_free*risk.margin_fraction)
         raise
     if request["type_filling"] not in (bridge.api.ORDER_FILLING_FOK, bridge.api.ORDER_FILLING_IOC):
         raise Blocked("Baskets require FOK or IOC; unfilled volume must not remain pending")
     request, loss, margin, target_detail = costed_target(bridge, request, spec, risk, atr)
+    broker_count = volume_capacity(info, side, lot)
+    capacity_detail = {}
+    if count == 0:
+        available = min(account.equity*fraction,
+            account.equity-guard.day_start*(1-risk.daily_loss),
+            account.equity-guard.peak*(1-risk.max_drawdown))
+        limits = {"stop_risk": max(0, math.floor((available+1e-8)/loss)),
+                  "margin": max(0, math.floor((account.margin_free*risk.margin_fraction+1e-8)/margin)),
+                  "broker_volume": broker_count,
+                  "daily_quota": max(0, risk.max_trades-guard.entries) if risk.max_trades else None}
+        count = min(n for n in limits.values() if n is not None)
+        capacity_detail = {"sizing_mode": "capacity", "count_limits": limits,
+                           "limiting_factors": [k for k, n in limits.items() if n == count]}
+        if count < 1:
+            raise Blocked(guard.reason(risk) or "No order fits the remaining basket capacity",
+                          code="basket_capacity", details=capacity_detail)
+    if broker_count is not None and count > broker_count:
+        raise Blocked("Basket exceeds broker directional volume limit", code="broker_volume_limit",
+                      details={"requested_orders": count, "available_orders": broker_count})
     try:
         detail = budget_check(account, guard, risk, loss*count, margin*count, count, fraction)
     except Blocked as error:
         error.details = target_detail | (error.details or {})
         raise
-    return request, target_detail | detail | {"lot": lot, "total_lots": lot*count, "loss_per_order": loss,
+    return request, target_detail | detail | capacity_detail | {"lot": lot, "total_lots": lot*count, "loss_per_order": loss,
                               "margin_per_order": margin, "sl": request["sl"], "tp": request["tp"]}
 
 
@@ -189,7 +228,7 @@ def validate_child(bridge, memory, basket_id, key, request, account, positions, 
     child = next((c for c in group["children"] if c["key"] == key), None)
     if child is None or child["request"] != request or child_order(memory, key)[0] is not None:
         raise Blocked("Basket child is not authorized or was already submitted")
-    if len(group["children"]) > 1 and getattr(account, "margin_mode", None) != 2:
+    if group["plan"]["requested_orders"] > 1 and getattr(account, "margin_mode", None) != 2:
         raise Blocked("Separate basket positions require hedging mode")
     ids = {c.get("position_id") for c in group["children"]} - {None}
     if pending or any(p.magic != MAGIC or p.symbol != group["symbol"] or
@@ -198,10 +237,18 @@ def validate_child(bridge, memory, basket_id, key, request, account, positions, 
     if any(p.sl <= 0 or p.tp <= 0 or p.type != request["type"] for p in positions):
         raise Blocked("A sibling lost its protective stops or direction")
     risk, spec = Risk(**group["risk"]), Spec(**group["spec"])
+    cap = volume_capacity(bridge.symbol(spec.symbol), group["side"], request["volume"], positions, pending)
+    if cap is not None and cap < 1:
+        raise Blocked("Broker directional volume capacity was exhausted", code="broker_volume_limit")
+    open_ids = {getattr(p, "identifier", p.ticket) for p in positions}
+    if any(c.get("position_id") not in open_ids for c in group["children"]
+           if child_order(memory, c["key"])[0] == "sent"):
+        raise Blocked("A filled sibling closed; remaining entries cancelled")
     guard = Guard(**memory.get_state("guard:"+group["account_key"], {}))
     guard.update(account.equity, day_key(time.time()), risk)
     loss, gain, margin = order_cost(bridge, request, spec)
-    remaining = sum(child_order(memory, c["key"])[0] is None for c in group["children"])
+    remaining = group["plan"]["requested_orders"] - sum(
+        child_order(memory, c["key"])[0] is not None for c in group["children"])
     committed = sum(c.get("risk_cash", 0.) for c in group["children"] if child_order(memory, c["key"])[0] == "sent")
     used_margin = sum(c.get("margin_cash", group["plan"]["margin_per_order"])
                       for c in group["children"] if child_order(memory, c["key"])[0] == "sent")
@@ -229,6 +276,7 @@ def submit_basket(bridge, memory, account, meta, digest, guard, side, atr, lot, 
     spec = Spec(**meta["spec"])
     risk = Risk(**meta["risk"])
     request, plan = request_plan(bridge, account, guard, spec, risk, side, atr, lot, count, fraction)
+    count = plan["requested_orders"]
     # Read-only manual check calls the actual broker's order_check, without any
     # order claims. Aggregate budget is separately checked above.
     if intent and intent["check_only"]:
@@ -240,20 +288,25 @@ def submit_basket(bridge, memory, account, meta, digest, guard, side, atr, lot, 
     if not options["execute"]:
         return {"action": "BUY" if side > 0 else "SELL", "status": "dry_run", "orders_sent": 0, "plan": plan}
     gid = str(uuid.uuid4())
-    group = {"id": gid, "account_key": account_key(account), "scope": learning_scope(account, digest),
+    group = {"id": gid, "account_key": account_key(account), "scope": learning_scope(account, digest, meta),
              "digest": digest, "spec": asdict(spec), "risk": meta["risk"], "symbol": spec.symbol,
              "cfg": meta["scalp_config"], "side": side, "fraction": fraction, "created_at": time.time(),
              "deadline": deadline, "plan": plan, "status": "submitting", "manual": bool(intent),
+             "micro_config": meta.get("micro_config", {}), "entry_atr": atr,
              "vector": vector.tolist() if vector is not None else None,
-             "children": [{"key": f"{gid}:{i}", "request": request.copy()} for i in range(count)]}
+             "children": []}
     # Both writes precede the first claim/send. A crash never resumes entries.
     memory.put_state("basket:"+gid, group)
     memory.put_state("active-basket:"+group["account_key"], gid)
     results, error = [], None
     try:
-        for child in group["children"]:
+        for i in range(count):
             if cancelled() or time.time() > deadline:
                 raise Blocked("Remaining basket entries cancelled or expired")
+            # Journal lazily so even a large capacity cannot allocate millions
+            # of child records before the opportunity expires.
+            child = {"key": f"{gid}:{i}", "request": request.copy()}
+            group["children"].append(child)
             positions, pending = bridge.positions()
             refresh_group(bridge, memory, group, positions, time.time())
             tick = bridge.tick(spec.symbol)
@@ -266,6 +319,7 @@ def submit_basket(bridge, memory, account, meta, digest, guard, side, atr, lot, 
                 **options, basket_id=gid, entry_deadline=deadline)
             results.append(receipt)
             if receipt["status"] == "sent":
+                group.setdefault("first_fill_at", time.time())
                 filled = child["request"] | {"volume": receipt["volume"], "price": receipt["price"]}
                 child["risk_cash"], _, child["margin_cash"] = order_cost(bridge, filled, spec)
                 guard.entries += 1
@@ -348,10 +402,14 @@ def manage_group(bridge, memory, group, account, guard, options, kill_file, pres
             return {"action": "WAIT", "reason": "basket_settled", "basket_id": group["id"]}
     reason = group.get("close_reason")
     if own:
-        if (Path(kill_file).exists() or guard.daily_halt or guard.total_halt or
-                any(p.sl <= 0 or p.tp <= 0 for p in own) or
-                now-group["created_at"] >= risk.max_hold_bars*60):
-            reason = "basket_time_risk_or_stop"
+        if Path(kill_file).exists():
+            reason = "operator_stop"
+        elif guard.daily_halt or guard.total_halt:
+            reason = "basket_risk_halt"
+        elif any(p.sl <= 0 or p.tp <= 0 for p in own):
+            reason = "basket_missing_protection"
+        elif now-group.get("first_fill_at", group["created_at"]) >= risk.max_hold_bars*60:
+            reason = "basket_holding_limit"
         elif pressure is not None:
             # Include already-closed siblings and charged entry fees; the open
             # positions alone cannot establish that the entire basket is ahead.
@@ -374,6 +432,9 @@ def manage_group(bridge, memory, group, account, guard, options, kill_file, pres
                 group["pressure_exit_wait"] = str(exc)
                 group.pop("weak_since", None)
                 group.pop("estimated_liquidation_net", None)
+        elif MicroConfig(**group.get("micro_config", {})).exit_policy == "confirmed":
+            group.pop("weak_since", None)
+            group.pop("weak_last_tick", None)
         if reason:
             group["close_reason"] = reason
     memory.put_state("basket:"+group["id"], group)
@@ -394,7 +455,8 @@ def manage_group(bridge, memory, group, account, guard, options, kill_file, pres
                 results.append({"status": "blocked", "reason": str(exc), "details": exc.details})
     return {"action": "CLOSE" if reason else "WAIT", "reason": reason or "managing_basket",
             "basket_id": group["id"], "open_positions": len(own), "receipts": results,
-            "estimated_liquidation_net": group.get("estimated_liquidation_net")}
+            "estimated_liquidation_net": group.get("estimated_liquidation_net"),
+            "exit_diagnostics": group.get("exit_diagnostics")}
 
 
 def execution_step(bridge, model_path, memory, expected_login, calendar=None, execute=False,
@@ -427,10 +489,12 @@ def execution_step(bridge, model_path, memory, expected_login, calendar=None, ex
     if group:
         bridge.neural_status = {"phase": "managing_positions", "reason": "Open-basket exits take priority over new neural input"}
         result = manage_group(bridge, memory, group, account, guard, options, kill_file, pressure)
+        group_learning = learning_state(memory, group["scope"])
         bridge.scalp_status = (getattr(bridge, "scalp_status", None) or {}) | {
             "symbol": group["symbol"], "style": "micro" if not group["manual"] else cfg.style,
-            "risk": group["risk"], "risk_budget_cash": account.equity*risk.fraction,
-            "micro_config": meta.get("micro_config"), "entries_today": guard.entries,
+            "risk": group["risk"], "risk_budget_cash": account.equity*Risk(**group["risk"]).fraction,
+            "micro_config": group.get("micro_config", asdict(MicroConfig())), "entries_today": guard.entries,
+            "learning": {k: v for k, v in group_learning.items() if k not in ("weights", "tick_weights")},
             "basket": {k: group[k] for k in ("id", "status", "plan", "manual")},
             "pressure": pressure, "last_decision": result}
         if manual:
@@ -461,13 +525,13 @@ def execution_step(bridge, model_path, memory, expected_login, calendar=None, ex
                    "closed_at": float(bars.time[-1]+60), "encoded": None}
         cache[digest] = context
         bridge._micro_context = cache
-    scope = learning_scope(account, digest)
+    scope = learning_scope(account, digest, meta)
     learned = learning_state(memory, scope)
     bridge.scalp_status = {"symbol": spec.symbol, "style": cfg.style, "context_bars": 500,
         "risk": meta["risk"], "entries_today": guard.entries, "structure": context["structure"],
         "risk_budget_cash": account.equity*risk.fraction, "micro_config": meta.get("micro_config"),
         "risk_peak_equity": guard.peak, "day_start_equity": guard.day_start,
-        "learning": {k: v for k, v in learned.items() if k != "weights"}, "pressure": pressure,
+        "learning": {k: v for k, v in learned.items() if k not in ("weights", "tick_weights")}, "pressure": pressure,
         "market_data": closed_bar_status(context["closed_at"]-60, 60, time.time())}
     positions, pending = bridge.positions()
     gate = (guard.reason(risk) or ("uncertain_order_requires_reconciliation" if memory.unresolved() else
@@ -513,7 +577,8 @@ def execution_step(bridge, model_path, memory, expected_login, calendar=None, ex
         if not signal:
             bridge.scalp_status["last_decision"] = decision
             return decision
-        vector = readout_context(context["encoded"], signal)
+        vector = (micro_readout_context(context["encoded"], signal, context["atr"])
+                  if meta.get("learning_version", 1) == 2 else readout_context(context["encoded"], signal))
         score, adjustment = entry_score(learned, vector, signal["score"], cfg)
         decision.update(setup=signal, entry_score=score, learned_adjustment=adjustment)
         last_exit = max(learned["last_exit"], memory.get_state("basket-last-exit:"+ak, 0.))
@@ -528,7 +593,7 @@ def execution_step(bridge, model_path, memory, expected_login, calendar=None, ex
         if decision["reason"] != "ready":
             bridge.scalp_status["last_decision"] = decision
             return decision
-        side, count, lot = signal["side"], micro.orders, micro.lot
+        side, count, lot = signal["side"], 0 if micro.sizing_mode == "capacity" else micro.orders, micro.lot
         fraction, deadline = micro.basket_risk, signal["expires_at"]
     if not (manual and manual["check_only"]):
         NewsGate(calendar).check(time.time(), risk.max_hold_bars*60)

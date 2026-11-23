@@ -1,5 +1,34 @@
 # Validation record
 
+## v0.6.0 — Adaptive Micro capacity and patient exits — 2026-11-23 (Asia/Kabul)
+
+- Added zero/unlimited daily count and capacity-sized autonomous baskets, still
+  bounded by original stop-risk, daily-loss, drawdown and margin allowances.
+  Broker directional volume is rechecked per child; lazy journaling prevents
+  large theoretical capacity from allocating unsubmitted records. Expiry,
+  partial/unknown fills and a closed sibling stop further submissions.
+- Confirmed profit protection uses minimum hold, R-scaled profit arming,
+  spread/ATR noise hysteresis and sustained fresh-quote confirmation. A new
+  five-minute profile limit replaces the old two-minute default only on explicit
+  upgrade/new preparation. Emergency exits remain independent; legacy profiles
+  and already-open baskets retain their frozen timing/configuration.
+- Added eight entry-time tick features without repurposing the original 86
+  weights. Atomic settled-basket rewards include net fees, prediction changes,
+  update magnitudes and revisions. Upgrades preserve account/mode-scoped learning
+  lineage without clearing guards or changing the original profile file.
+- Local core: **245 tests, 236 passed, 9 skipped**. New coverage includes more
+  than ten children after 250 entries, all capacity bounds, changing broker
+  limits, partial fills, closed siblings, very large capacity + expiry, both
+  exit directions, noisy/duplicate/gapped quotes, five-minute timing, reward
+  changes affecting future entry decisions, restart/idempotency, API auth,
+  profile upgrades and unchanged risk guards. JavaScript syntax is checked.
+- Hosted Windows (including Python 3.13), Linux, full-connectome and Chromium
+  checks are recorded on the release commit's workflow. Browser coverage includes
+  unlimited/capacity defaults, fixed-mode switching and learning-preserving
+  upgrade selection without automatic engine startup.
+- Broker regression tests use fakes. No native MT5 orders were sent here; fill
+  quality, new-policy profitability and win rate have not been established.
+
 ## v0.5.3 — Weekly calendar compatibility — 2026-11-23 (Asia/Kabul)
 
 - Reproduced rejection of the provider's `Holiday` impact label found in the
