@@ -221,8 +221,9 @@ class Workstation:
         if "login" in allowed and (type(allowed["login"]) is not int or allowed["login"] <= 0):
             raise ValueError("A positive MT5 account number is required")
         if "calendar" in allowed:
-            self.resolve(allowed["calendar"], "data", must_exist=False)
-            allowed["calendar_auto"] = False
+            calendar = self.resolve(allowed["calendar"], "data", must_exist=False)
+            if calendar != self.resolve(self.config["calendar"], "data", must_exist=False):
+                allowed["calendar_auto"] = False
         if "broker_clock" in allowed:
             allowed["broker_clock"] = BrokerClock.from_config(allowed["broker_clock"]).config()
         if self.bridge:

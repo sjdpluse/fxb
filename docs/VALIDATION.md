@@ -1,5 +1,22 @@
 # Validation record
 
+## v0.5.3 — Weekly calendar compatibility — 2026-11-23 (Asia/Kabul)
+
+- Reproduced rejection of the provider's `Holiday` impact label found in the
+  current weekly export. Holiday entries now import with the original
+  `source_impact` retained; the normalized economic-release impact is `low`.
+  This does not infer trading sessions or change the broker's quote checks.
+- Saving account/clock configuration with the existing calendar path preserves
+  automatic updates. Selecting another file or uploading a manual calendar still
+  disables them. Previously disabled auto-refresh requires explicit re-enabling.
+- Both new regressions failed before the fix and passed afterward. Local core:
+  **225 tests, 216 passed, 9 skipped**. Tests verify holiday import, retained USD
+  high-impact blackout, 24-hour expiry and persistence of auto-refresh settings.
+  Unknown classifications and invalid/stale downloads remain rejected.
+- No clock tolerance, broker clock rule, trade-sizing limit or order path changed.
+  Native Windows time synchronization and the user's terminal clock still require
+  a local `clock-check`; no broker orders were submitted during this work.
+
 ## v0.5.2 — Explicit demo risk periods — 2026-11-19 (Asia/Kabul)
 
 - Added a reviewed, account-bound restart for a re-funded demo account. The

@@ -52,19 +52,24 @@ def parse_weekly(rows, now, modified):
         if (not isinstance(title, str) or not title.strip() or len(title) > 500
                 or not isinstance(currency, str) or len(currency) != 3 or not currency.isalpha()
                 or not isinstance(row.get("date"), str)
-                or impact not in ("High", "Medium", "Low", "Non-Economic")):
+                or impact not in ("High", "Medium", "Low", "Non-Economic", "Holiday")):
             raise ValueError("Unknown calendar event schema or impact; refresh was not applied")
         at = timestamp(row["date"])
         if not start <= at < end:
             raise ValueError("Calendar feed is not for the current week")
-        impact = "low" if impact == "Non-Economic" else impact.lower()
+        source_impact = impact
+        # The provider labels bank holidays separately from economic releases.
+        # Retain that classification without treating it as a high-impact release
+        # or making any claim about the broker's trading hours.
+        impact = "low" if impact in ("Non-Economic", "Holiday") else impact.lower()
         key = (at, currency.upper(), title.strip())
         if key in seen:
-            if seen[key] != impact:
+            if seen[key] != source_impact:
                 raise ValueError("Conflicting duplicate calendar events")
             continue
-        seen[key] = impact
-        events.append({"time": iso(at), "currency": currency.upper(), "impact": impact, "title": title.strip()})
+        seen[key] = source_impact
+        events.append({"time": iso(at), "currency": currency.upper(), "impact": impact,
+                       "source_impact": source_impact, "title": title.strip()})
     if not any(e["currency"] == "USD" for e in events):
         raise ValueError("Calendar feed contains no USD coverage")
     return {"source_url": SOURCE, "provider": "Forex Factory weekly export",

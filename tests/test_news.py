@@ -31,6 +31,39 @@ class Response(io.BytesIO):
 
 
 class CalendarTests(unittest.TestCase):
+    def test_holiday_rows_import_without_suppressing_high_impact_events(self):
+        rows=ROWS+[{"title":"Software holiday fixture", "country":currency,
+                    "date":"2026-11-16T07:30:00-05:00", "impact":"Holiday"}
+                   for currency in ("JPY","USD")]
+        with tempfile.TemporaryDirectory() as temp:
+            path=Path(temp)/"news.json"
+            with patch("fxb.news.urlopen",return_value=Response(rows=rows)), \
+                 patch("time.time",return_value=NOW):
+                result=refresh_calendar(path)
+            self.assertEqual(result["events"],3)
+            doc=json.loads(path.read_text())
+            holidays=[e for e in doc['events'] if e.get('source_impact')=='Holiday']
+            self.assertEqual(len(holidays),2)
+            self.assertTrue(all(e['impact']=='low' for e in holidays))
+            with self.assertRaisesRegex(Blocked,"news blackout"):
+                NewsGate(path).check(NOW,300)
+            NewsGate(path).check(NOW+1800,300)
+            with self.assertRaisesRegex(Blocked,"coverage"):
+                NewsGate(path).check(NOW+86401,300)
+
+    def test_saving_unchanged_calendar_with_new_clock_keeps_automatic_refresh(self):
+        with tempfile.TemporaryDirectory() as temp:
+            c=Workstation(temp)
+            c.config.update(calendar="data/news-auto.json",calendar_auto=True)
+            # A client can include the current calendar in a full config update.
+            c.configure({"login":123,"server":"test","terminal":"",
+                         "calendar":"data/news-auto.json","broker_clock":{"zone":"+02:00"}})
+            saved=Workstation(temp).config
+            self.assertTrue(saved['calendar_auto'])
+            self.assertEqual(saved['broker_clock']['zone'],'+02:00')
+            c.configure({"calendar":"data/manual-calendar.json"})
+            self.assertFalse(Workstation(temp).config['calendar_auto'])
+
     def test_timezone_impact_and_source_update_survive_import(self):
         doc = parse_weekly(ROWS, NOW, NOW-60)
         self.assertEqual(doc["events"][0]["time"], "2026-11-16T12:10:00+00:00")
