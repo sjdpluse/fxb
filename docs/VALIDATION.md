@@ -1,5 +1,39 @@
 # Validation record
 
+## v0.7.0 — Structural execution and observable learning — 2026-11-23 (Asia/Kabul)
+
+- Reproduced the stale neural WAITING phase during automatic basket submission.
+  Regression checks now assert SUBMITTING at actual fake-SDK sends and MANAGING
+  with filled positions. UI tests cover both phases independently of an older
+  worker WAIT result. Manual origins and the last entry plan are explicit.
+- New/upgraded Micro uses causal closed-bar structure zones and risk-sized lots.
+  The nearest liquidity target is never skipped/extended to fabricate RR; the
+  complete configured cost-adjusted RR is enforced again for every child.
+  Legacy entry profiles remain unchanged until explicitly upgraded.
+- Local core: **261 tests, 251 passed, 10 environment-dependent skips**.
+  Coverage includes $5 infeasibility on the standard test contract versus a
+  separately defined smaller contract, account-currency sizing up to $5000,
+  structure/target rejection, exact entry attribution and cloud outbox retry.
+- Actual full graph: both whole-brain tests passed; all five fast-brain tests
+  passed, including exact Brian2 spike/embedding/state parity over 40 windows.
+  The raster records actual kernel timestep/neuron IDs without changing the
+  numerical schedule. Reward events include the resulting readout weights.
+- The live Supabase migration and scoped Edge endpoint were deployed. A real
+  64-character-ID connection event was ingested and queried once; identical
+  retry succeeded, changed-content collision returned HTTP 409, invalid token
+  returned HTTP 401. Anonymous table access and RPC execution are denied.
+  Security advisors report only the expected backend-only RLS/no-policy INFO
+  for FXB objects; the new time index is initially unused. Other project objects
+  were not changed. The test event is explicitly not a learning sample.
+- Windows user-bound DPAPI credential storage and Chromium UI checks are also
+  exercised in the release workflow. The local Playwright download was
+  unavailable and the system browser could not create its process socket; hosted
+  Chromium is the release UI verification path.
+- No native MT5 account/order was operated in this environment. These checks
+  establish software behavior, not profitability or a positive live expectancy.
+  A $5 balance does not override a broker's minimum lot, margin or stop risk.
+
+
 ## v0.6.0 — Adaptive Micro capacity and patient exits — 2026-11-23 (Asia/Kabul)
 
 - Added zero/unlimited daily count and capacity-sized autonomous baskets, still

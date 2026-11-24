@@ -42,7 +42,10 @@ def create_app(root=".", preview=False, token=None):
     @asynccontextmanager
     async def lifespan(app):
         controller.start_calendar_refresh()
+        if not preview:
+            controller.cloud.start()
         yield
+        controller.cloud.stop()
         controller.stop_calendar_refresh()
         controller.worker_stop.set()
         controller.cancel_job.set()
@@ -153,6 +156,7 @@ def create_app(root=".", preview=False, token=None):
                     daily_loss_percent=payload.get("daily_loss_percent"),
                     basket_orders=payload.get("basket_orders", 5), basket_lot=payload.get("basket_lot", .01),
                     basket_risk_percent=payload.get("basket_risk_percent", 2.5),
+                    lot_mode=payload.get("lot_mode", "risk"),
                     sizing_mode=payload.get("sizing_mode", "capacity"), hold_minutes=payload.get("hold_minutes", 5),
                     min_hold_seconds=payload.get("min_hold_seconds", 20),
                     confirmation_seconds=payload.get("confirmation_seconds", 3))
@@ -176,6 +180,11 @@ def create_app(root=".", preview=False, token=None):
             if action == "calendar/save": return controller.save_calendar(payload)
             if action == "calendar/auto": return controller.enable_calendar_auto()
             if action == "memory/sync": return controller.sync()
+            if action == "memory/connect":
+                try:
+                    return controller.cloud.configure(payload)
+                except RuntimeError as error:
+                    raise ValueError(str(error)) from None
             return JSONResponse({"error": "Unknown operation"}, status_code=404)
 
     @app.get("/")

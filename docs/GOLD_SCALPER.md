@@ -1,4 +1,38 @@
-# Gold M1 scalper — 0.6.0
+# Gold M1 scalper — 0.7.0
+
+## Structural entries in 0.7.0
+
+New or explicitly upgraded Micro profiles require quote momentum PLUS a closed
+M1 structure setup: confirmed liquidity sweep / existing ICT gap retest,
+breakout retest, or trend-aligned pullback. M5 bias uses only closed blocks.
+Stops are beyond the invalidation extreme with a 0.10 ATR / two-tick buffer.
+Targets are before the nearest observed opposing pivot/range bound, never
+pushed beyond it just to manufacture a reward ratio. SELL bid-bar zones are
+converted to the closing ask side. Every child is checked against the full
+configured net reward/risk ratio after commission and adverse slippage.
+
+A hypothetical $5 account is not automatically executable: the broker minimum
+lot, stop distance, free margin and risk budget must permit it. Automatic sizing
+uses account-currency `order_calc_profit` and `order_calc_margin`, without moving
+the structural stop to fit the account or silently increasing risk. This is
+not evidence that JustMarkets' standard gold contract is feasible at $5.
+
+The engine shows SUBMITTING before contacting MT5 and MANAGING after confirmed
+fills. Manual requests are explicitly labelled and do not become learning
+samples. WAITING for a tick is distinct from managing an existing basket.
+
+The raster contains real kernel spike indices and 0.1 ms timestamps from the
+last simulation window, capped at 4096 events. It does not animate fabricated
+spikes between M1 observations. The 19 market features, input rates, learning
+revision, contribution of the 64 neural outputs and last entry plan are visible.
+Reward = settled net cash / original filled stop risk; the bounded readout
+updates once per fully closed autonomous basket. Prediction error, weight delta
+and resulting weights are persisted together. Biological synapses are fixed;
+"dopamine" is an analogy for the reward signal, not a biological implementation.
+
+These new setup rules have software regression coverage, not verified market
+profitability. Low win rate alone and high win rate alone do not determine net
+expectancy; actual costs and average win/loss matter.
 
 ## Micro baskets and manual orders
 
@@ -23,8 +57,9 @@ promise to capture every fluctuation or provide low-latency HFT execution.
 New Micro profiles default to **capacity sizing** and **no daily count cap**
 (`max_trades=0`). A positive count still selects an optional daily quota. Capacity
 is the integer minimum of remaining aggregate stop-risk allowance, free-margin
-budget and the broker's declared directional volume allowance, at **0.01 or
-0.02 lot per order**. There is no fixed ten-order cap in capacity mode. Fixed mode
+budget and the broker's declared directional volume allowance, using the actual broker-calculated per-order volume. New profiles default to
+**risk-based volume**, floored to the broker step; optional fixed volume keeps
+the explicit 0.01/0.02 choice. There is no fixed ten-order cap in capacity mode. Fixed mode
 retains an explicit 5..10 count; manual checks/sends retain their explicit 1..10
 count. More orders are not additional independent opportunities or learning samples.
 
@@ -44,14 +79,17 @@ Stops, gaps and delayed replies can produce losses beyond estimates.
 
 Children are submitted sequentially, with a durable unique order claim each.
 Every position receives broker SL/TP. Only FOK/IOC filling is supported for
-baskets; RETURN is rejected because an unfilled remainder could stay pending. Stops use at least 0.45 M1 ATR, 4.1
+baskets; RETURN is rejected because an unfilled remainder could stay pending.
+Legacy momentum profiles use stops of at least 0.45 M1 ATR, 4.1
 spreads and the broker minimum distance; net planned reward must cover risk
 including configured costs. In 0.5.1 the initial target is priced for the
 configured **net** reward/risk ratio using `order_calc_profit`. Configured
 round-trip commission and slippage are included; volume and SL are unchanged.
 The target cannot exceed 2.5 ATR times the configured reward ratio. Incompatible
 costs remain blocked with the required target, cash risk and cost inputs shown.
-Every repriced child still needs net reward at least equal to its stop risk.
+Every repriced child now requires the full configured net reward/risk ratio.
+New structural profiles use the zones described above instead of the legacy
+ATR target extension.
 A rejection, partial fill, expired signal, operator
 stop or unknown response cancels remaining children. Already-confirmed positions
 continue being managed. Unknown entries are never automatically retried; they

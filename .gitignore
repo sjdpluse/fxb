@@ -16,3 +16,4 @@ backups/
 build/
 dist/
 .coverage
+supabase/.temp/

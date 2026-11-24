@@ -19,7 +19,8 @@ from .connectome import WholeBrain, install, read_manifest, geometry, sha256
 from .data import load_bars, save_bars, timestamp
 from .clock import BrokerClock
 from .execution import LiveAuthorization
-from .memory import Memory, SupabaseSink
+from .memory import Memory
+from .cloud import CloudJournal
 from .mt5 import MT5, Blocked, WorkerLock, cycle, reconcile, MAGIC, NewsGate
 from .research import train
 
@@ -37,6 +38,7 @@ class Workstation:
         self.brain_dir = self.root / "data/connectome"
         os.environ["FXB_BRAIN_DIRECTORY"] = str(self.brain_dir)
         self.db_path = self.state_dir / "runtime.sqlite"
+        self.cloud = CloudJournal(self.state_dir, self.db_path)
         self.preview = preview
         self.lock = threading.RLock()
         self.job = {"status": "idle", "kind": None}
@@ -166,6 +168,9 @@ class Workstation:
                 "models": self.models(), "datasets": self.datasets(), "active_models": self.active_models,
                 "brain": {"manifest": manifest, "activity": activity}, "job": dict(self.job),
                 "journal": journal, "decisions": self.last_decisions[-20:], "events": self.events[-25:],
+                "cloud": self.cloud.public_status(),
+                "pipeline": {"last_evaluation": getattr(self.bridge, "last_evaluation", None),
+                             "last_entry": getattr(self.bridge, "last_entry_trace", None)},
                 "scalper": getattr(self.bridge, "scalp_status", None),
                 "manual_order": self.manual_result,
                 "error": self.last_error, "live_activation": self.authorization.public_status() if self.authorization else None,
@@ -373,7 +378,7 @@ class Workstation:
 
     def prepare_scalper(self, symbol, commission, slippage, overnight, style="structure",
                         risk_percent=None, max_trades=None, daily_loss_percent=None,
-                        basket_orders=5, basket_lot=.01, basket_risk_percent=2.5,
+                        basket_orders=5, basket_lot=.01, basket_risk_percent=2.5, lot_mode="risk",
                         sizing_mode="capacity", hold_minutes=5, min_hold_seconds=20,
                         confirmation_seconds=3):
         from .scalper_runtime import create_profile
@@ -395,7 +400,7 @@ class Workstation:
             raise ValueError("Basket risk percentage must be a number")
         micro = MicroConfig(basket_orders, basket_lot, basket_risk_percent/100,
             sizing_mode=sizing_mode, exit_policy="confirmed", min_hold_seconds=min_hold_seconds,
-            confirmation_seconds=confirmation_seconds) if style == "micro" else None
+            confirmation_seconds=confirmation_seconds, entry_policy="structure", lot_mode=lot_mode) if style == "micro" else None
         if micro and micro.min_hold_seconds >= risk.max_hold_bars*60:
             raise ValueError("Minimum protection hold must be shorter than maximum holding time")
         if micro and micro.basket_risk > risk.daily_loss:
@@ -537,6 +542,7 @@ class Workstation:
         self.bridge._micro_histories = {}
         self.bridge._micro_context = {}
         self.bridge.scalp_status = None
+        self.bridge.last_evaluation = self.bridge.last_entry_trace = None
         self.bridge.neural_status = {"phase": "waiting_for_data", "reason": "Waiting for fresh M1 data"}
         self.worker_state = {"phase": "starting", "reason": None, "lock_recovered": lease.recovered}
         gc.collect()
@@ -574,6 +580,9 @@ class Workstation:
                                                      reason=failure.get("reason") or result.get("reason"),
                                                      reason_code=failure.get("code"), details=failure.get("details"))
                         except Blocked as e:
+                            if is_scalper:
+                                self.bridge.neural_status = {"phase": "entry_blocked", "reason": str(e),
+                                                            "reason_code": e.code, "details": e.details}
                             self.finish_manual(memory, intent, {"status": "blocked", "reason": str(e), "reason_code": e.code, "details": e.details, "orders_sent": 0})
                             self.last_error = str(e)
                             self.worker_state.update(phase="blocked", reason=str(e), reason_code=e.code, details=e.details)
@@ -728,14 +737,8 @@ class Workstation:
 
     def sync(self):
         def work(update):
-            memory = Memory(self.db_path)
-            try:
-                sink = SupabaseSink(os.environ.get("FXB_SUPABASE_URL", ""), os.environ.get("FXB_SUPABASE_SECRET_KEY", ""))
-                total = 0
-                while count := memory.sync(sink):
-                    total += count
-                    update({"stage": "sync", "events": total})
-                return {"events": total}
-            finally:
-                memory.close()
+            total = self.cloud.sync_once()
+            if self.cloud.public_status()["status"] == "not_configured":
+                raise ValueError("Import your FXB Supabase connection file in Memory first")
+            return {"events": total, **self.cloud.public_status()}
         return self.launch_job("memory_sync", work)

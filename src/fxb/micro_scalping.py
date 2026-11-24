@@ -21,6 +21,8 @@ class MicroConfig:
     confirmation_seconds: int = 3
     profit_arm_r: float = .5
     giveback_fraction: float = .35
+    entry_policy: str = "momentum"
+    lot_mode: str = "fixed"
 
     def __post_init__(self):
         if type(self.orders) is not int or not 5 <= self.orders <= 10:
@@ -32,6 +34,8 @@ class MicroConfig:
             raise ValueError("Basket risk must be 0.1..5% of equity")
         if self.sizing_mode not in ("fixed", "capacity") or self.exit_policy not in ("legacy", "confirmed"):
             raise ValueError("Unknown basket sizing or exit policy")
+        if self.entry_policy not in ("momentum", "structure") or self.lot_mode not in ("fixed", "risk"):
+            raise ValueError("Unknown entry or lot policy")
         if (type(self.min_hold_seconds) is not int or not 5 <= self.min_hold_seconds <= 120
                 or type(self.confirmation_seconds) is not int or not 2 <= self.confirmation_seconds <= 15
                 or type(self.profit_arm_r) not in (int, float) or not .25 <= self.profit_arm_r <= 2

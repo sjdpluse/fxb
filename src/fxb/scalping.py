@@ -243,6 +243,21 @@ def entry_score(state, vector, base, config):
     return float(base + adjustment), adjustment
 
 
+def decision_attribution(state, vector, base, config):
+    weights, vector = learning_arrays(state, vector, config)
+    parts = weights*vector
+    score, adjustment = entry_score(state, vector, base, config)
+    return {"base_score": base, "entry_score": score, "threshold": config.min_score,
+            "learned_adjustment": adjustment, "learning_revision": state["revision"],
+            "settled_samples": state["samples"], "predicted_reward_r": float(parts.sum()),
+            "market_contribution_r": float(parts[:19].sum()),
+            "neural_contribution_r": float(parts[19:83].sum()),
+            "setup_contribution_r": float(parts[83:86].sum()),
+            "tick_contribution_r": float(parts[86:].sum()),
+            "learning_method": "bounded_reward_prediction_error_readout",
+            "biological_synapses_trainable": False}
+
+
 def learn_closed(memory, scope, position_id, symbol, vector, net_cashflow, risk_cash,
                  opened_at, closed_at, observed_at, config=None):
     """Commit event + weight update together. Replaying a deal cannot learn twice."""
@@ -275,7 +290,11 @@ def learn_closed(memory, scope, position_id, symbol, vector, net_cashflow, risk_
         delta = float(np.linalg.norm(weights-previous))
         state.update(weights=weights[:READOUT_DIM].tolist(), tick_weights=weights[READOUT_DIM:].tolist(),
                      revision=state.get("revision", state["samples"])+1,
-                     last_reward_r=reward, last_weight_delta=delta,
+                     last_reward_r=reward, last_weight_delta=delta, last_reward_error_r=error,
+                     last_outcome="reward" if net_cashflow > 0 else "penalty" if net_cashflow < 0 else "flat",
+                     gross_profit=state.get("gross_profit", 0.)+max(net_cashflow, 0.),
+                     gross_loss=state.get("gross_loss", 0.)+max(-net_cashflow, 0.),
+                     performance_samples=state.get("performance_samples", 0)+1,
                      last_prediction_before_r=prediction, last_prediction_after_r=float(weights @ vector),
                      samples=state["samples"]+1,
                      wins=state["wins"]+int(net_cashflow > 0), losses=state["losses"]+int(net_cashflow < 0),
@@ -289,5 +308,7 @@ def learn_closed(memory, scope, position_id, symbol, vector, net_cashflow, risk_
                 "risk_cash": risk_cash, "reward_r": reward, "closed_at": closed_at,
                 "state": vector.tolist(), "prediction_before_r": prediction,
                 "prediction_after_r": float(weights @ vector), "weight_delta_norm": delta,
+                "reward_prediction_error_r": error, "outcome": state["last_outcome"],
+                "weights_after": weights.tolist(),
                 "revision": state["revision"]}, allow_nan=False), event_id))
     return True

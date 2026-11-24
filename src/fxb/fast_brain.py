@@ -46,11 +46,13 @@ def cache_lock(path):
 
 
 def _advance(v, g, last, refractory, queue, lengths, tick, offsets, targets, weights,
-             inputs, uniforms, probabilities, decay_g, v_const, g_to_v, decay_v):
+             inputs, uniforms, probabilities, decay_g, v_const, g_to_v, decay_v,
+             raster_indices=None, raster_steps=None):
     n = len(v)
     counts = np.zeros(n, dtype=np.int64)
     available = np.empty(n, dtype=np.bool_)
     fired = np.empty(n, dtype=np.int32)
+    recorded = 0
     for k in range(len(uniforms)):
         now = tick + k
         nfired = 0
@@ -65,6 +67,9 @@ def _advance(v, g, last, refractory, queue, lengths, tick, offsets, targets, wei
                     fired[nfired] = i
                     nfired += 1
                     counts[i] += 1
+                    if raster_indices is not None and raster_steps is not None and recorded < len(raster_indices):
+                        raster_indices[recorded], raster_steps[recorded] = i, k
+                        recorded += 1
                     last[i] = now
                     available[i] = False
         # A shared 1.8 ms delay lets the queue store source IDs instead of
@@ -176,9 +181,11 @@ class FastWholeBrain(WholeBrain):
         seed = (self.seed + int.from_bytes(key[:4], "little")) % (2**32 - 1)
         steps = round(self.window_ms / .1)
         uniforms = np.random.RandomState(seed).random_sample((steps, len(self.inputs)))
+        raster_indices = np.full(4096, -1, dtype=np.int32)
+        raster_steps = np.full(4096, -1, dtype=np.int32)
         counts = self.kernel(self.v, self.g, self.last, self.refractory, self.queue, self.lengths,
                              self.tick, self.offsets, self.targets, self.weights, self.inputs,
-                             uniforms, rates * .0001, *self.coefficients)
+                             uniforms, rates * .0001, *self.coefficients, raster_indices, raster_steps)
         self.tick += steps
         self.last_counts = counts
         active = np.flatnonzero(counts)
@@ -190,6 +197,10 @@ class FastWholeBrain(WholeBrain):
                        "wall_seconds": time.perf_counter() - started, "indices": strongest.tolist(),
                        "counts": counts[strongest].tolist(), "pool_activity": embedding.tolist(),
                        "input_rates": rates.tolist(), "mean_voltage_mv": float(self.v.mean() * 1000),
+                       "input_features": x.tolist(),
+                       "raster": {"indices": raster_indices[raster_indices >= 0].tolist(),
+                                  "times_ms": (raster_steps[raster_indices >= 0]*.1).tolist(),
+                                  "truncated": int(counts.sum()) > len(raster_indices)},
                        "implementation": IMPLEMENTATION, "source": "compiled_full_shiu_lif_simulation",
                        "display_activity_capped_at": 4000}
         return np.r_[x, embedding]

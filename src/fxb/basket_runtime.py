@@ -112,11 +112,11 @@ def costed_target(bridge, request, spec, risk, atr):
         "net_reward_risk": gain/loss, "target_adjusted_for_costs": request["tp"] != original_target}
 
 
-def request_plan(bridge, account, guard, spec, risk, side, atr, lot, count, fraction):
+def request_plan(bridge, account, guard, spec, risk, side, atr, lot, count, fraction, zones=None):
     # Zero is internal capacity sizing, never a request to submit zero orders.
     if type(count) is not int or count < 0 or type(side) is not int or side not in (-1, 1):
         raise ValueError("Choose BUY/SELL and a nonnegative integer order count")
-    if type(lot) not in (int, float) or lot not in (.01, .02):
+    if lot is not None and (type(lot) not in (int, float) or lot not in (.01, .02)):
         raise ValueError("Choose 0.01 or 0.02 lot")
     if count != 1 and getattr(account, "margin_mode", None) != 2:
         raise Blocked("Separate basket positions require an MT5 hedging account")
@@ -126,9 +126,10 @@ def request_plan(bridge, account, guard, spec, risk, side, atr, lot, count, frac
     # the broker's minimum closing-quote distance. Each order retains SL/TP.
     distance = max(.45*atr, 4.1*spread, info.trade_stops_level*info.point+spread+spec.tick_size)
     entry = tick.ask if side > 0 else tick.bid
+    stop = zones["stop_bid"] + (spread if side < 0 else 0) if zones else entry-side*distance
     try:
         request = bridge.request(spec.symbol, side, atr, spec, risk, account,
-                                 structural_stop=entry-side*distance, fixed_volume=lot)
+                                 structural_stop=stop, fixed_volume=lot)
     except Blocked as error:
         error.details = {"stage": "local_risk_check", "atr": atr, "spread": spread,
                          "requested_orders": count, "requested_lot": lot, **(error.details or {})}
@@ -143,7 +144,24 @@ def request_plan(bridge, account, guard, spec, risk, side, atr, lot, count, frac
         raise
     if request["type_filling"] not in (bridge.api.ORDER_FILLING_FOK, bridge.api.ORDER_FILLING_IOC):
         raise Blocked("Baskets require FOK or IOC; unfilled volume must not remain pending")
-    request, loss, margin, target_detail = costed_target(bridge, request, spec, risk, atr)
+    sizing = "risk" if lot is None else "fixed"
+    lot = request["volume"]
+    if zones:
+        target = zones["target_bid"] + (spread if side < 0 else 0)
+        target = round_price(target, spec.tick_size, up=side < 0)
+        request = request | {"tp": target}
+        loss, gain, margin = order_cost(bridge, request, spec)
+        target_detail = {"zones": zones, "net_reward_risk": gain/loss,
+                         "net_gain_per_order": gain, "loss_per_order": loss,
+                         "required_net_reward_risk": risk.reward_risk, "currency": account.currency,
+                         "target_adjusted_for_costs": False}
+        closing = tick.bid if side > 0 else tick.ask
+        if (target <= 0 or side*(target-closing) <= info.trade_stops_level*info.point
+                or gain+1e-8 < risk.reward_risk*loss):
+            raise Blocked("Nearest liquidity target cannot cover the required reward after costs",
+                          code="structure_reward_risk", details=target_detail)
+    else:
+        request, loss, margin, target_detail = costed_target(bridge, request, spec, risk, atr)
     broker_count = volume_capacity(info, side, lot)
     capacity_detail = {}
     if count == 0:
@@ -168,7 +186,7 @@ def request_plan(bridge, account, guard, spec, risk, side, atr, lot, count, frac
     except Blocked as error:
         error.details = target_detail | (error.details or {})
         raise
-    return request, target_detail | detail | capacity_detail | {"lot": lot, "total_lots": lot*count, "loss_per_order": loss,
+    return request, target_detail | detail | capacity_detail | {"lot_mode": sizing, "lot": lot, "total_lots": lot*count, "loss_per_order": loss,
                               "margin_per_order": margin, "sl": request["sl"], "tp": request["tp"]}
 
 
@@ -254,7 +272,7 @@ def validate_child(bridge, memory, basket_id, key, request, account, positions, 
                       for c in group["children"] if child_order(memory, c["key"])[0] == "sent")
     if used_margin+remaining*max(margin, group["plan"]["margin_per_order"]) > group["plan"]["margin_budget_cash"]+1e-8:
         raise Blocked("Repriced basket exceeds its original aggregate margin budget")
-    if loss > account.equity*risk.fraction+1e-8 or gain < loss:
+    if loss > account.equity*risk.fraction+1e-8 or gain+1e-8 < loss*risk.reward_risk:
         raise Blocked("Repriced child exceeds risk or net reward constraints", code="repriced_child_budget",
                       details={"loss_per_order": loss, "net_gain_per_order": gain,
                                "risk_budget_cash": account.equity*risk.fraction, "currency": account.currency})
@@ -263,7 +281,8 @@ def validate_child(bridge, memory, basket_id, key, request, account, positions, 
 
 
 def submit_basket(bridge, memory, account, meta, digest, guard, side, atr, lot, count,
-                  fraction, options, deadline, vector=None, intent=None, cancelled=lambda: False):
+                  fraction, options, deadline, vector=None, intent=None, cancelled=lambda: False,
+                  zones=None, decision_trace=None):
     if cancelled():
         raise Blocked("Entry cancelled by operator")
     positions, pending = bridge.positions()
@@ -275,8 +294,10 @@ def submit_basket(bridge, memory, account, meta, digest, guard, side, atr, lot, 
         raise Blocked("Uncertain previous order requires reconciliation")
     spec = Spec(**meta["spec"])
     risk = Risk(**meta["risk"])
-    request, plan = request_plan(bridge, account, guard, spec, risk, side, atr, lot, count, fraction)
-    count = plan["requested_orders"]
+    request, plan = request_plan(bridge, account, guard, spec, risk, side, atr, lot, count, fraction, zones)
+    count, lot = plan["requested_orders"], plan["lot"]
+    if decision_trace is not None:
+        decision_trace = decision_trace | {"plan": plan}
     # Read-only manual check calls the actual broker's order_check, without any
     # order claims. Aggregate budget is separately checked above.
     if intent and intent["check_only"]:
@@ -293,11 +314,14 @@ def submit_basket(bridge, memory, account, meta, digest, guard, side, atr, lot, 
              "cfg": meta["scalp_config"], "side": side, "fraction": fraction, "created_at": time.time(),
              "deadline": deadline, "plan": plan, "status": "submitting", "manual": bool(intent),
              "micro_config": meta.get("micro_config", {}), "entry_atr": atr,
+             "decision_trace": decision_trace,
              "vector": vector.tolist() if vector is not None else None,
              "children": []}
     # Both writes precede the first claim/send. A crash never resumes entries.
     memory.put_state("basket:"+gid, group)
     memory.put_state("active-basket:"+group["account_key"], gid)
+    bridge.neural_status = {"phase": "submitting", "reason": "manual_entry" if intent else "neural_and_structure_entry_accepted",
+                           "decision_id": decision_trace.get("id") if decision_trace else None}
     results, error = [], None
     try:
         for i in range(count):
@@ -336,7 +360,8 @@ def submit_basket(bridge, memory, account, meta, digest, guard, side, atr, lot, 
     sent = sum(r["status"] == "sent" for r in results)
     return {"action": "BUY" if side > 0 else "SELL", "status": "sent" if sent == count else "partial" if sent else "blocked",
             "reason": "manual_entry" if intent else "micro_momentum", "basket_id": gid,
-            "orders_sent": sent, "requested_orders": count, "plan": plan, "receipts": results, "error": error}
+            "orders_sent": sent, "requested_orders": count, "plan": plan, "receipts": results, "error": error,
+            "decision_trace": decision_trace}
 
 
 def settle_group(memory, group, deals, own, now):
@@ -489,6 +514,8 @@ def execution_step(bridge, model_path, memory, expected_login, calendar=None, ex
     if group:
         bridge.neural_status = {"phase": "managing_positions", "reason": "Open-basket exits take priority over new neural input"}
         result = manage_group(bridge, memory, group, account, guard, options, kill_file, pressure)
+        if result.get("reason") == "basket_settled":
+            bridge.neural_status = {"phase": "settled", "reason": "basket_settled"}
         group_learning = learning_state(memory, group["scope"])
         bridge.scalp_status = (getattr(bridge, "scalp_status", None) or {}) | {
             "symbol": group["symbol"], "style": "micro" if not group["manual"] else cfg.style,
@@ -522,7 +549,7 @@ def execution_step(bridge, model_path, memory, expected_login, calendar=None, ex
             raise Blocked("Micro entry requires 500 real M1 bars with fresh, contiguous recent history")
         raw, atr, signals, structure = analyze(bars, cfg)
         context = {"bars": bars, "raw": raw, "atr": float(atr[-1]), "structure": structure[-1],
-                   "closed_at": float(bars.time[-1]+60), "encoded": None}
+                   "closed_at": float(bars.time[-1]+60), "encoded": None, "signal": signals[-1]}
         cache[digest] = context
         bridge._micro_context = cache
     scope = learning_scope(account, digest, meta)
@@ -544,7 +571,7 @@ def execution_step(bridge, model_path, memory, expected_login, calendar=None, ex
         return result
     micro = MicroConfig(**meta["micro_config"]) if cfg.style == "micro" else None
     decision = {"action": "WAIT", "reason": "micro_waiting_for_quote_momentum", "bar_closed_at": context["closed_at"]}
-    vector = None
+    vector, zones, trace = None, None, None
     if manual:
         bridge.neural_status = {"phase": "manual_request", "reason": "Manual execution does not require a neural signal"}
         side, count, lot = manual["side"], manual["count"], manual["lot"]
@@ -577,9 +604,32 @@ def execution_step(bridge, model_path, memory, expected_login, calendar=None, ex
         if not signal:
             bridge.scalp_status["last_decision"] = decision
             return decision
+        if micro.entry_policy == "structure":
+            from .market_plan import structure_plan
+            try:
+                zones = structure_plan(context["bars"], context["structure"], signal["side"],
+                    pressure["bid"], context["atr"], spec.tick_size, context.get("signal"))
+            except Blocked as error:
+                decision.update(reason=error.code, details=error.details)
+                bridge.neural_status = {"phase": "waiting_for_setup", "reason": error.code}
+                bridge.scalp_status["last_decision"] = decision
+                return decision
+            signal["structure_kind"] = zones["kind"]
         vector = (micro_readout_context(context["encoded"], signal, context["atr"])
                   if meta.get("learning_version", 1) == 2 else readout_context(context["encoded"], signal))
         score, adjustment = entry_score(learned, vector, signal["score"], cfg)
+        from .scalping import decision_attribution
+        trace = decision_attribution(learned, vector, signal["score"], cfg) | {
+            "id": str(uuid.uuid4()), "source": "autonomous", "symbol": spec.symbol,
+            "bar_closed_at": context["closed_at"], "quote_time": pressure["time"],
+            "evaluated_at": time.time(), "setup": signal.get("structure_kind", signal["kind"]),
+            "side": signal["side"], "zones": zones,
+            "neural_window_ms": getattr(brain, "latest", {}).get("window_ms"),
+            "neural_spikes": getattr(brain, "latest", {}).get("spikes", 0),
+            "neural_observed_at": getattr(brain, "latest", {}).get("observed_at"),
+            "input_features": context["raw"][-1].tolist()}
+        bridge.scalp_status["decision_trace"] = trace
+        bridge.last_evaluation = trace
         decision.update(setup=signal, entry_score=score, learned_adjustment=adjustment)
         last_exit = max(learned["last_exit"], memory.get_state("basket-last-exit:"+ak, 0.))
         if time.time()-last_exit < cfg.cooldown_seconds:
@@ -591,14 +641,29 @@ def execution_step(bridge, model_path, memory, expected_login, calendar=None, ex
         else:
             decision["reason"] = "ready"
         if decision["reason"] != "ready":
+            bridge.neural_status = {"phase": "entry_filtered", "reason": decision["reason"], "decision_id": trace["id"]}
             bridge.scalp_status["last_decision"] = decision
             return decision
-        side, count, lot = signal["side"], 0 if micro.sizing_mode == "capacity" else micro.orders, micro.lot
+        side, count, lot = signal["side"], 0 if micro.sizing_mode == "capacity" else micro.orders, None if micro.lot_mode == "risk" else micro.lot
         fraction, deadline = micro.basket_risk, signal["expires_at"]
     if not (manual and manual["check_only"]):
         NewsGate(calendar).check(time.time(), risk.max_hold_bars*60)
+    if manual and micro and micro.entry_policy == "structure":
+        from .market_plan import structure_plan
+        zones = structure_plan(context["bars"], context["structure"], side, bridge.tick(spec.symbol).bid,
+                               context["atr"], spec.tick_size, manual=True)
+    bridge.neural_status = {"phase": "checking_order",
+                           "reason": "manual_entry" if manual else "neural_and_structure_entry_accepted",
+                           "decision_id": trace["id"] if trace else manual.get("request_id") if manual else None}
     result = submit_basket(bridge, memory, account, meta, digest, guard, side, context["atr"], lot, count,
-                          fraction, options, deadline, vector, manual, cancelled)
+                          fraction, options, deadline, vector, manual, cancelled, zones, trace)
+    bridge.neural_status = {"phase": "managing_positions" if result.get("orders_sent", 0) else
+                           "entry_blocked" if result.get("status") in ("blocked", "rejected") else "waiting_for_ticks",
+                           "reason": result.get("reason"), "last_submission": result.get("status"),
+                           "orders_sent": result.get("orders_sent", 0), "decision_id": trace["id"] if trace else None}
     bridge.scalp_status["last_decision"] = result
+    if result.get("orders_sent", 0):
+        bridge.last_entry_trace = result.get("decision_trace") or {
+            "source": "manual", "side": side, "evaluated_at": time.time(), "plan": result.get("plan")}
     memory.record(scope, spec.symbol, "manual_result" if manual else "micro_decision", now, time.time(), result)
     return result

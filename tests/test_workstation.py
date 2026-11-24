@@ -44,9 +44,24 @@ class WorkstationTests(unittest.TestCase):
     def test_preview_has_no_account_or_trading_authority(self):
         with TestClient(create_app(self.root, preview=True, token=self.token)) as client:
             self.assertEqual(client.get("/api/status").status_code, 200)
-            for endpoint in ("execution/start", "account/configure", "data/export", "memory/sync", "calendar/save", "calendar/auto", "training/start", "scalper/prepare", "scalper/upgrade"):
+            for endpoint in ("execution/start", "account/configure", "data/export", "memory/sync", "memory/connect", "calendar/save", "calendar/auto", "training/start", "scalper/prepare", "scalper/upgrade"):
                 with self.subTest(endpoint=endpoint):
                     self.assertEqual(client.post("/api/" + endpoint, json={}).status_code, 403)
+
+    def test_cloud_connection_is_owner_only_and_secret_is_never_echoed(self):
+        from fxb.cloud import DeviceSink
+        config={'schema':1,'project_url':'https://abc.supabase.co','device_token':'fxb_device_'+'a'*64}
+        self.assertEqual(self.client.post('/api/memory/connect',json=config).status_code,401)
+        with patch.object(DeviceSink,'__call__',return_value={'accepted':0,'device_id':'test'}):
+            r=self.client.post('/api/memory/connect',headers=self.headers,json=config)
+        self.assertEqual(r.status_code,200)
+        status=self.client.get('/api/status',headers=self.headers)
+        self.assertNotIn(config['device_token'],r.text+status.text)
+        self.assertEqual(status.json()['cloud']['status'],'connected')
+        with patch.object(DeviceSink,'__call__',side_effect=RuntimeError('Supabase HTTP 401')):
+            r=self.client.post('/api/memory/connect',headers=self.headers,json=config)
+        self.assertEqual(r.status_code,409)
+        self.assertNotIn(config['device_token'],r.text)
 
     def test_model_path_and_calendar_path_cannot_escape_project(self):
         c = self.app.state.controller

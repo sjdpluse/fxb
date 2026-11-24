@@ -11,7 +11,7 @@ from pathlib import Path
 from .data import load_bars, save_bars, synthetic_bars, FEATURE_NAMES
 from .brain import import_connectome
 from .research import train, evaluate_file, walk_forward
-from .memory import Memory, SupabaseSink
+from .memory import Memory
 from .mt5 import MT5, Blocked, WorkerLock, NewsGate, cycle, reconcile
 from .clock import BrokerClock
 
@@ -289,7 +289,11 @@ def run(args):
         try:
             synced = 0
             if args.sync:
-                sink = SupabaseSink(os.environ.get("FXB_SUPABASE_URL", ""), os.environ.get("FXB_SUPABASE_SECRET_KEY", ""))
+                from .cloud import CloudJournal
+                cloud = CloudJournal(Path(args.db).parent, args.db)
+                sink = cloud.sink()
+                if sink is None:
+                    raise ValueError("Import the private FXB connection file in the workstation Memory page first")
                 while True:
                     n = memory.sync(sink)
                     synced += n

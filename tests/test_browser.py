@@ -78,6 +78,15 @@ class BrowserTests(unittest.TestCase):
                         status['manual_order']={'status':'blocked','reason_code':'basket_budget','details':{'total_risk_cash':10,'risk_budget_cash':5}}
                         expect(page.locator("#engine-state")).to_have_text("WARMUP")
                         expect(page.locator("#activity-source")).to_contain_text("60")
+                        status['brain']['activity']['execution']={'phase':'submitting','reason':'neural_and_structure_entry_accepted'}
+                        expect(page.locator('#engine-state')).to_have_text('SUBMITTING')
+                        status['brain']['activity']['execution']={'phase':'managing_positions'}
+                        expect(page.locator('#engine-state')).to_have_text('MANAGING')
+                        status['brain']['activity'].update(window_ms=20,raster={'indices':[1,2,1],'times_ms':[.1,2.,3.], 'truncated':False})
+                        page.locator('[data-page="brain"]').click()
+                        expect(page.locator('#spike-raster')).to_be_visible()
+                        expect(page.locator('#raster-note')).to_contain_text('3 شلیک')
+                        page.locator('[data-page="execution"]').click()
                         self.assertIn('BLOCKED',page.locator('#manual-status').text_content())
                         self.assertIn('total_risk_cash',page.locator('#manual-result').text_content())
                         status.update(preview=False,connected=True)

@@ -131,7 +131,7 @@ def upgrade_micro_profile(source, output):
         raise ValueError("Basket risk exceeds daily limit")
     parent = sha256(source)
     new_risk = replace(risk, max_trades=0, max_hold_bars=5)
-    new_micro = replace(micro, sizing_mode="capacity", exit_policy="confirmed")
+    new_micro = replace(micro, sizing_mode="capacity", exit_policy="confirmed", entry_policy="structure", lot_mode="risk")
     meta.update(risk=asdict(new_risk), micro_config=asdict(new_micro), learning_version=2,
         learning_key=meta.get("learning_key", parent), parent_model_sha256=parent,
         run_id=output.name, created_at=time.time(),

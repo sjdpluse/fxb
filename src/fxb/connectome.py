@@ -244,7 +244,7 @@ class WholeBrain:
                 "simulation_ms": float(self.net.t / b.ms), "window_ms": self.window_ms,
                 "wall_seconds": time.perf_counter() - started, "indices": strongest.tolist(),
                 "counts": counts[strongest].tolist(), "pool_activity": embedding.tolist(),
-                "input_rates": rates.tolist(), "mean_voltage_mv": float(np.mean(self.neurons.v / b.mV)),
+                "input_rates": rates.tolist(), "input_features": x.tolist(), "mean_voltage_mv": float(np.mean(self.neurons.v / b.mV)),
                 "source": "full_original_shiu_brian2_simulation", "display_activity_capped_at": 4000}
         return np.r_[x, embedding]
 

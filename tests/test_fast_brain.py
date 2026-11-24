@@ -22,9 +22,12 @@ class CompiledKernelTests(unittest.TestCase):
         last, refractory = np.full(2, -1000, dtype=np.int64), np.full(2, 22, dtype=np.int64)
         queue, lengths = np.zeros((19, 2), dtype=np.int32), np.zeros(19, dtype=np.int64)
         args = (np.array([0, 1, 1]), np.array([1]), np.array([.02]), np.array([0]))
+        indices, steps = np.full(8, -1, dtype=np.int32), np.full(8, -1, dtype=np.int32)
         counts = _advance(v, g, last, refractory, queue, lengths, 0, *args,
-                          np.zeros((18, 1)), np.ones(1), *coefficients)
+                          np.zeros((18, 1)), np.ones(1), *coefficients, indices, steps)
         np.testing.assert_array_equal(counts, [1, 0])
+        np.testing.assert_array_equal(indices[indices >= 0], [0])
+        np.testing.assert_array_equal(steps[steps >= 0], [0])
         self.assertEqual(g[1], 0)
         self.assertEqual(v[0], v0)
         _advance(v, g, last, refractory, queue, lengths, 18, *args,

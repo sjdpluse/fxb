@@ -1,3 +1,3 @@
 """FXB connectome trading workstation with controlled MT5 execution."""
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
