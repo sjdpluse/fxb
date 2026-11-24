@@ -78,6 +78,21 @@ class BrowserTests(unittest.TestCase):
                         status['manual_order']={'status':'blocked','reason_code':'basket_budget','details':{'total_risk_cash':10,'risk_budget_cash':5}}
                         expect(page.locator("#engine-state")).to_have_text("WARMUP")
                         expect(page.locator("#activity-source")).to_contain_text("60")
+                        expect(page.locator('#spikes')).to_have_text('—')
+                        status['brain']['activity'].update(spikes=0,active_neurons=0,simulation_ms=1280,
+                            observed_at=time.time(),input_source='closed_market_bars',
+                            observation={'processed_bars':64,'recent_windows':64,'recent_spikes':123,'remaining_bars':0})
+                        status['brain']['activity']['execution']={'phase':'entry_blocked','reason':'daily_loss'}
+                        status['worker']['reason']='daily_loss'
+                        expect(page.locator('#engine-state')).to_have_text('BLOCKED')
+                        expect(page.locator('#activity-label')).to_have_text('M1 PROCESSED')
+                        expect(page.locator('#spikes')).to_have_text('0')
+                        expect(page.locator('#activity-source')).to_contain_text('123')
+                        status['brain']['activity']['execution']={'phase':'waiting_for_setup','reason':'structure_stop_distance'}
+                        status['worker'].update(reason='structure_stop_distance',details={'stage':'structure_validation',
+                            'failure':'too_far','bid':100.,'stop_bid':97.,'distance_price':3.,'distance_atr':3.,'max_distance_price':2.5})
+                        expect(page.locator('#engine-state')).to_have_text('WAITING')
+                        expect(page.locator('#engine-detail')).to_contain_text('3.00 ATR')
                         status['brain']['activity']['execution']={'phase':'submitting','reason':'neural_and_structure_entry_accepted'}
                         expect(page.locator('#engine-state')).to_have_text('SUBMITTING')
                         status['brain']['activity']['execution']={'phase':'managing_positions'}

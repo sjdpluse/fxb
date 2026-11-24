@@ -6,6 +6,8 @@ const scalpReasons = {neural_warmup:'آماده‌سازی مغز با کندل�
 Object.assign(scalpReasons,{operator_stop:'توقف توسط کاربر',basket_risk_halt:'توقف ریسک سبد',basket_missing_protection:'حفاظت SL/TP ناقص',basket_holding_limit:'پایان زمان نگهداری سبد',favorable_quote_pressure_weakened:'محافظت سود پس از ضعف حرکت',basket_capacity:'ظرفیت قابل‌استفاده برای سفارش وجود ندارد',broker_volume_limit:'حد حجم بروکر'});
 Object.assign(scalpReasons,{no_structure_setup:'تیک حرکت دارد؛ تأیید ساختار وجود ندارد',no_structure_target:'هدف نقدینگی معتبر پیدا نشد',structure_stop_distance:'فاصلهٔ ابطال ساختار نامعتبر است',structure_reward_risk:'هدف ساختاری نسبت سود به زیان خالص را پوشش نمی‌دهد',neural_and_structure_entry_accepted:'ورود پس از ارزیابی مغز و ساختار تأیید شد',basket_settled:'سبد تسویه شد؛ نتیجهٔ واقعی ثبت شد'});
 const scalpReason = value => scalpReasons[value] || value || '—';
+const structureDiagnostic = d => d?.stage==='structure_validation'
+  ? ` · ${d.failure==='crossed'?'سطح ابطال پیش از ورود شکسته است':'حد ضرر ساختاری بیش از حد دور است'} · قیمت ${num(d.bid,3)} · SL ${num(d.stop_bid,3)} · فاصله ${num(d.distance_price,3)} (${num(d.distance_atr,2)} ATR) / حداکثر ${num(d.max_distance_price,3)}` : '';
 const hash = new URLSearchParams(location.hash.slice(1));
 if (hash.has('token')) { sessionStorage.setItem('fxb_token', hash.get('token')); history.replaceState(null, '', location.pathname); }
 const token = sessionStorage.getItem('fxb_token') || '';
@@ -48,9 +50,10 @@ function render(s){
   $('demo-session-restart').disabled=demoUnavailable||!demoReview;
   const worker=s.worker||{}, neural=s.brain.activity.execution||{};
   const initializing=neural.phase==='warming_up'&&neural.remaining_bars==null;
-  const enginePhase=worker.phase==='failed'?'FAILED':worker.phase==='blocked'?'BLOCKED':!s.running?'STANDBY':worker.phase==='stopping'?'STOPPING':neural.phase==='submitting'?'SUBMITTING':neural.phase==='managing_positions'?'MANAGING':neural.phase==='checking_order'?'CHECKING':!s.entries_enabled?'PAUSED':neural.phase==='warming_up'?(initializing?'INITIALIZING':'WARMUP'):worker.phase==='starting'?'STARTING':worker.phase==='waiting'?'WAITING':'RUNNING';
+  const enginePhase=worker.phase==='failed'?'FAILED':worker.phase==='blocked'?'BLOCKED':!s.running?'STANDBY':worker.phase==='stopping'?'STOPPING':neural.phase==='submitting'?'SUBMITTING':neural.phase==='managing_positions'?'MANAGING':neural.phase==='checking_order'?'CHECKING':!s.entries_enabled?'PAUSED':neural.phase==='entry_blocked'?'BLOCKED':neural.phase==='warming_up'?(initializing?'INITIALIZING':'WARMUP'):worker.phase==='starting'?'STARTING':worker.phase==='waiting'?'WAITING':'RUNNING';
   $('engine-state').textContent=enginePhase;
   $('engine-detail').textContent=s.running?`${s.mode.toUpperCase()} · ${scalpReason(worker.reason||neural.reason||'')}${worker.cycle_completed_at?' · '+kabTime(worker.cycle_completed_at)+' کابل':''}`:(worker.reason||'منتظر اتصال و انتخاب مدل');
+  if(s.running)$('engine-detail').textContent+=structureDiagnostic(worker.details||s.scalper?.last_decision?.details||neural.details);
   $('run-badge').textContent=s.running?s.mode.toUpperCase():'STOPPED';
   const error=s.error||(s.job.status==='failed'?s.job.error:null);$('system-alert').hidden=!error;$('system-alert').textContent=error||'';
   const manifest=s.brain.manifest;
@@ -58,13 +61,16 @@ function render(s){
   if(manifest){$('nodes').textContent=num(manifest.neurons);$('edges').textContent=num(manifest.connections);$('synapses').textContent=num(manifest.synapse_contacts);$('neuron-count').textContent=num(manifest.neurons)+' NEURONS';if(!geometryLoaded&&!geometryLoading)loadGeometry();}
   else{$('brain-empty').textContent='برای دریافت مدل اصلی به تنظیمات بروید.';$('brain-empty').hidden=false;}
   const activity=s.job.status==='running'&&s.job.kind==='train'&&s.job.progress.activity?s.job.progress.activity:s.brain.activity;
-  $('spikes').textContent=num(activity.spikes||0);$('active-neurons').textContent=num(activity.active_neurons||0);$('simulation-ms').textContent=num(activity.simulation_ms||0,0)+' ms';$('wall-seconds').textContent=activity.wall_seconds==null?'—':num(activity.wall_seconds,2)+' s';
-  $('activity-label').textContent=s.running?(neural.phase||'WAITING').toUpperCase():(activity.spikes?'LAST WINDOW':'IDLE');
+  const processed=Number(activity.simulation_ms)>0, observation=activity.observation;
+  $('spikes').textContent=num(processed?activity.spikes:null);$('active-neurons').textContent=num(processed?activity.active_neurons:null);$('simulation-ms').textContent=num(processed?activity.simulation_ms:null,0)+' ms';$('wall-seconds').textContent=activity.wall_seconds==null?'—':num(activity.wall_seconds,2)+' s';
+  $('activity-label').textContent=s.running&&(observation?.remaining_bars>0||neural.phase==='warming_up')?'WARMUP':processed?(s.running&&activity.observed_at?'M1 PROCESSED':'LAST WINDOW'):'AWAITING INPUT';
   let source=activity.input_source==='closed_market_bars'?'فعالیت آخرین پنجرهٔ واقعی؛ ورودی مغز با کندل بسته‌شدهٔ M1 به‌روز می‌شود.':activity.spikes?'خروجی آخرین شبیه‌سازی واقعی · تحریک دستی':'شبیه‌ساز هنوز ورودی را پردازش نکرده است.';
   if(neural.phase==='warming_up')source=initializing?'در حال بارگذاری و آماده‌سازی گراف؛ هنوز آمادهٔ استنتاج نیست.':`آماده‌سازی مرحله‌ای؛ ${num(neural.remaining_bars)} کندل باقی مانده. صف سفارش بین مراحل بررسی می‌شود.`;
   else if(neural.phase==='managing_positions')source+=' مدیریت خروج سبد در اولویت است.';
   else if(neural.reason&&s.running)source+=' '+scalpReason(neural.reason)+'.';
   if(activity.observed_at)source+=' آخرین پردازش: '+kabTime(activity.observed_at)+' کابل.';
+  if(observation)source+=` از شروع اجرا ${num(observation.processed_bars)} کندل پردازش شده؛ مجموع ${num(observation.recent_spikes)} شلیک در ${num(observation.recent_windows)} پنجرهٔ اخیر.`;
+  if(processed&&activity.spikes===0)source+=' در آخرین پنجره شلیکی ثبت نشده؛ این عدد به‌تنهایی به معنای توقف پردازش نیست.';
   $('activity-source').textContent=source;
   renderPipeline(s,activity);
   drawActivity(activity.pool_activity||[]);if(brain)brain.activity(activity.indices||[],activity.counts||[]);
@@ -94,6 +100,8 @@ function render(s){
   $('manual-summary').textContent=`حساب ${a?.login||'—'} · ${s.mode.toUpperCase()} · حجم کل انتخاب‌شده ${(Number($('manual-form').elements.lot.value)*Number($('manual-form').elements.count.value)).toFixed(2)} لات. بررسی، سفارش باز نمی‌کند؛ ارسال دستی سفارش واقعی به همین حساب می‌فرستد.`;
   if(manual)$('manual-result').textContent=JSON.stringify(manual,null,2);
   $('manual-status').textContent=manual?`${manual.status.toUpperCase()} · ${scalpReason(manual.reason_code||manual.error?.code||manual.error?.reason||manual.reason||'')}${manual.broker?' · MT5 '+manual.broker.retcode+' · '+manual.broker.comment:''}`:'بررسی اتصال: ابتدا یک سفارش ۰٫۰۱ لات را با «بررسی بدون ارسال» بررسی کنید.';
+  if(manual)$('manual-status').textContent+=structureDiagnostic(manual.details||manual.error?.details);
+  if(manual?.plan)$('manual-status').textContent+=` | SL ${num(manual.plan.sl,3)} · TP ${num(manual.plan.tp,3)} · نسبت سود به زیان خالص ${num(manual.plan.net_reward_risk,2)} · ${manual.plan.protection_source==='confirmed_structure'?'حدود ساختاری':'حدود نوسان و بروکر'}`;
   if(manual?.reason_code==='fixed_lot_budget'&&manual.details){const z=manual.details;$('manual-status').textContent+=` | ریسک سفارش ${num(z.risk_cash,2)} / بودجه ${num(z.risk_budget_cash,2)} ${z.currency}.`;if(z.minimum_equity_for_selected_risk!=null)$('manual-status').textContent+=` ریسک کل انتخاب‌شده ${num(z.total_risk_cash,2)}؛ حداقل سرمایهٔ محاسباتی با همین حدود ${num(z.minimum_equity_for_selected_risk,2)} ${z.currency}، با فرض رفع توقف‌های قبلی. این برآورد با قیمت تغییر می‌کند.`;}
 
   const market=scalp?.market_data;

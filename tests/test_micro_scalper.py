@@ -234,14 +234,27 @@ class BasketTests(unittest.TestCase):
         self.assertEqual(result['orders_sent'],0)
         self.assertIsNone(self.bridge._micro_context[self.digest]['encoded'])
 
-    def test_blocked_and_paused_neural_phases_explain_zero_activity(self):
+    def test_entry_halt_keeps_observing_without_sending_or_reusing_old_impulse(self):
         self.assertEqual(self.step(entries_enabled=False)['reason'],'entries_paused')
         self.assertEqual(self.bridge.neural_status['phase'],'paused')
         self.guard.daily_halt=True;self.m.put_state('guard:'+self.ak,asdict(self.guard))
-        self.brain.observe=lambda *args,**kw:(_ for _ in ()).throw(AssertionError('Entry gate should explain suspended inference'))
+        observed=[]
+        def observe(raw,times,**kw):
+            observed.append(kw['max_bars'])
+            self.brain.observation_progress={'remaining_bars':4 if len(observed)==1 else 0,'processed_this_cycle':4}
+            return None if len(observed)==1 else np.r_[raw[-1],np.ones(64)]
+        self.brain.observe=observe
         result=self.step()
         self.assertEqual(result['reason'],'daily_loss')
         self.assertEqual(self.bridge.neural_status['phase'],'entry_blocked')
+        self.assertEqual(self.bridge.neural_status['remaining_bars'],4)
+        self.assertEqual(self.step()['reason'],'daily_loss')
+        self.assertEqual(self.bridge.neural_status['remaining_bars'],0)
+        self.step()  # Same M1 bar must not run the graph again.
+        self.assertEqual(observed,[4,4])
+        self.assertEqual(self.bridge._micro_histories[self.b.spec.symbol],[])
+        self.assertEqual(self.api.calls,0)
+        self.assertEqual(self.m.db.execute('SELECT count(*) FROM orders').fetchone()[0],0)
 
     def test_remaining_daily_loss_allowance_is_reserved_for_entire_basket(self):
         self.account.equity=9701  # only $1 remains above the existing daily floor

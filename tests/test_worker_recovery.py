@@ -182,6 +182,7 @@ class IncrementalBrainTests(unittest.TestCase):
             self.last_time=None;self.seen=[];self.resets+=1
         def step(self,x):
             self.seen.append(float(x[0]))
+            self.latest={'spikes':0}
             return np.asarray([sum(self.seen)])
 
     def test_batched_warmup_preserves_state_and_matches_single_pass(self):

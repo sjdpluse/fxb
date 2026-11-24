@@ -59,8 +59,14 @@ def structure_plan(bars, structure, side, bid, atr, tick_size, signal=None, manu
     if anchor is None:
         raise Blocked("Tick impulse has no confirmed structure setup", code="no_structure_setup")
     stop = anchor-side*buffer
-    if not 0 < side*(bid-stop) <= 2.5*atr:
-        raise Blocked("Structural invalidation is already crossed or too far away", code="structure_stop_distance")
+    distance = side*(bid-stop)
+    if not 0 < distance <= 2.5*atr:
+        raise Blocked("Structural invalidation is already crossed or too far away", code="structure_stop_distance",
+            details={"stage": "structure_validation", "side": side, "bid": float(bid),
+                     "invalidation_bid": float(anchor), "stop_bid": float(stop), "atr": float(atr),
+                     "distance_price": float(distance), "max_distance_price": float(2.5*atr),
+                     "distance_atr": float(distance/atr) if atr > 0 else None,
+                     "failure": "crossed" if distance <= 0 else "too_far", "setup": kind})
     # Confirmed pivots AND the observed range bound are known before entry.
     targets = highs+[float(max(bars.high[-120:]))] if side > 0 else lows+[float(min(bars.low[-120:]))]
     targets = [x for x in targets if side*(x-bid) > 0]

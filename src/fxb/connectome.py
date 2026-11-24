@@ -262,6 +262,8 @@ class WholeBrain:
             raise ValueError("max_bars must be a positive integer")
         if self.last_time is None:
             self.reset()
+            self._observed_bars = 0
+            self._recent_spikes = []
             start = max(0, len(observations) - 64)
         else:
             start = int(np.searchsorted(timestamps, self.last_time, side="right"))
@@ -271,7 +273,13 @@ class WholeBrain:
         for i in range(start, end):
             self.last_embedding = self.step(observations[i])
             self.last_time = float(timestamps[i])
-            self.latest = self.latest | {"observed_at": time.time(), "market_bar_open_at": self.last_time}
+            self._observed_bars += 1
+            self._recent_spikes = (self._recent_spikes + [int(self.latest["spikes"])])[-64:]
+            self.latest = self.latest | {"observed_at": time.time(), "market_bar_open_at": self.last_time,
+                "observation": {"processed_bars": self._observed_bars,
+                                "recent_windows": len(self._recent_spikes),
+                                "recent_spikes": sum(self._recent_spikes),
+                                "remaining_bars": len(observations)-i-1}}
         self.observation_progress = {"remaining_bars": len(observations)-end, "processed_this_cycle": end-start}
         return self.last_embedding if end == len(observations) else None
 

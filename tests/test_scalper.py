@@ -376,9 +376,15 @@ class FullScalperTests(unittest.TestCase):
         encoded=brain.observe(raw,b.time)
         self.assertEqual(encoded.shape,(83,))
         self.assertGreater(brain.latest["spikes"],0)
+        observation=brain.latest['observation'].copy()
+        self.assertEqual(observation['processed_bars'],64)
+        self.assertEqual(observation['recent_windows'],64)
+        self.assertGreaterEqual(observation['recent_spikes'],brain.latest['spikes'])
+        self.assertEqual(observation['remaining_bars'],0)
         simulation=brain.latest["simulation_ms"]
         np.testing.assert_array_equal(brain.observe(raw,b.time),encoded)
         self.assertEqual(brain.latest["simulation_ms"],simulation)
+        self.assertEqual(brain.latest['observation'],observation)
         self.assertEqual(len(brain.ids),138639)
         expected_spikes=brain.latest["spikes"]
         brain.reset()
@@ -387,6 +393,7 @@ class FullScalperTests(unittest.TestCase):
             if batch<15:self.assertIsNone(incremental)
         np.testing.assert_array_equal(incremental,encoded)
         self.assertEqual(brain.latest["spikes"],expected_spikes)
+        self.assertEqual(brain.latest['observation'],observation)
         self.assertEqual(brain.latest["simulation_ms"],simulation)
         with tempfile.TemporaryDirectory() as temp:
             b.synthetic=False

@@ -1,6 +1,7 @@
 """Contract/risk and causal decision tests; fixtures are NOT profit evidence."""
 from dataclasses import replace, asdict
 from types import SimpleNamespace as NS
+from unittest.mock import Mock
 import unittest
 import numpy as np
 import test_micro_scalper as legacy
@@ -38,6 +39,20 @@ class PriceZones(unittest.TestCase):
         self.assertEqual(z['liquidity_bid'],100.4)
         self.assertLess(z['target_bid'],100.35)
 
+    def test_invalid_stop_reports_crossed_and_distant_geometry_both_directions(self):
+        for side in (1,-1):
+            for distance,why in ((-1.,'crossed'),(3.,'too_far')):
+                with self.subTest(side=side,distance=distance):
+                    with self.assertRaises(Blocked) as c:
+                        structure_plan(fixture(),{},side,100.,1.,.01,
+                            signal={'side':side,'stop_bid':100.-side*distance,'kind':'sweep_mss_fvg'})
+                    self.assertEqual(c.exception.code,'structure_stop_distance')
+                    detail=c.exception.details
+                    self.assertEqual(detail['failure'],why)
+                    self.assertAlmostEqual(detail['distance_price'],distance)
+                    self.assertAlmostEqual(detail['max_distance_price'],2.5)
+                    self.assertEqual(detail['stage'],'structure_validation')
+
 
 class ExecutionPrecision(unittest.TestCase):
     setUp=legacy.BasketTests.setUp
@@ -45,6 +60,64 @@ class ExecutionPrecision(unittest.TestCase):
     step=legacy.BasketTests.step
     send=legacy.BasketTests.send
     group=legacy.BasketTests.group
+
+    def test_manual_broker_check_on_structure_profile_does_not_require_entry_setup(self):
+        self.meta['micro_config']['entry_policy']='structure'
+        self.b.low[-8]=90.;self.b.high[-12]=110.
+        self.brain.observe=Mock(side_effect=AssertionError('Manual must not wait for warmup'))
+        self.api.order_check=Mock(wraps=self.api.order_check)
+        for side in (1,-1):
+            result=self.step(manual={'side':side,'count':1,'lot':.01,'check_only':True,'expires_at':self.now+10})
+            self.assertEqual(result['status'],'checked')
+            self.assertEqual(result['orders_sent'],0)
+            self.assertTrue(result['broker_contacted'])
+            self.assertEqual(result['plan']['protection_source'],'volatility_and_broker_limits')
+            self.assertGreaterEqual(result['plan']['net_reward_risk']+1e-8,self.risk.reward_risk)
+            request=self.api.order_check.call_args.args[0]
+            self.assertGreater(side*(request['price']-request['sl']),0)
+            self.assertGreater(side*(request['tp']-request['price']),0)
+        self.assertEqual(self.api.order_check.call_count,2)
+        self.brain.observe.assert_not_called()
+        self.assertEqual(self.api.calls,0)
+
+    def test_manual_structure_profile_still_blocks_unaffordable_volume_before_broker(self):
+        self.meta['micro_config']['entry_policy']='structure'
+        self.account.equity=self.account.margin_free=5.
+        self.api.order_check=Mock(wraps=self.api.order_check)
+        with self.assertRaises(Blocked) as c:
+            self.step(manual={'side':1,'count':1,'lot':.01,'check_only':True,'expires_at':self.now+10})
+        self.assertEqual(c.exception.code,'fixed_lot_budget')
+        self.api.order_check.assert_not_called()
+        self.assertEqual(self.api.calls,0)
+
+    def test_automatic_structure_rejection_waits_with_geometry_after_neural_processing(self):
+        self.meta['micro_config']['entry_policy']='structure'
+        self.brain.observe=Mock(wraps=self.brain.observe)
+        self.step()
+        self.bridge._micro_context[self.digest]['signal']={'side':1,'stop_bid':90.,'kind':'sweep_mss_fvg'}
+        result={}
+        for i in range(1,8):
+            self.now+=.5;self.api.quote=NS(bid=100+i*.015,ask=100.02+i*.015,time_msc=self.now*1000)
+            result=self.step()
+            if result.get('reason')=='structure_stop_distance':break
+        self.assertEqual(result['reason'],'structure_stop_distance')
+        self.assertEqual(result['action'],'WAIT')
+        self.assertEqual(result['details']['failure'],'too_far')
+        self.assertEqual(self.bridge.neural_status['phase'],'waiting_for_setup')
+        self.brain.observe.assert_called_once()
+        self.assertEqual(self.api.calls,0)
+
+    def test_manual_send_on_structure_profile_keeps_stops_and_no_learning_vector(self):
+        self.meta['micro_config']['entry_policy']='structure'
+        result=self.step(manual={'side':1,'count':1,'lot':.01,'check_only':False,'expires_at':self.now+10})
+        self.assertEqual(result['orders_sent'],1)
+        self.assertEqual(self.api.calls,1)
+        self.assertTrue(self.group()['manual'])
+        self.assertIsNone(self.group()['vector'])
+        position=self.api.open_positions[0]
+        self.assertLess(position.sl,position.price_open)
+        self.assertGreater(position.tp,position.price_open)
+        self.assertGreaterEqual(result['plan']['net_reward_risk'],self.risk.reward_risk)
 
     def plan(self,**kw):
         args=dict(side=1,atr=1.,lot=None,count=1,fraction=.025,

@@ -186,7 +186,7 @@ def request_plan(bridge, account, guard, spec, risk, side, atr, lot, count, frac
     except Blocked as error:
         error.details = target_detail | (error.details or {})
         raise
-    return request, target_detail | detail | capacity_detail | {"lot_mode": sizing, "lot": lot, "total_lots": lot*count, "loss_per_order": loss,
+    return request, target_detail | detail | capacity_detail | {"protection_source": "confirmed_structure" if zones else "volatility_and_broker_limits", "lot_mode": sizing, "lot": lot, "total_lots": lot*count, "loss_per_order": loss,
                               "margin_per_order": margin, "sl": request["sl"], "tp": request["tp"]}
 
 
@@ -564,8 +564,25 @@ def execution_step(bridge, model_path, memory, expected_login, calendar=None, ex
     gate = (guard.reason(risk) or ("uncertain_order_requires_reconciliation" if memory.unresolved() else
             "account_has_exposure" if positions or pending else ""))
     bridge.scalp_status["entry_gate"] = gate
+    updated_context = False
+    if not manual and context["encoded"] is None:
+        # Entry permission must not disable observation of valid market data.
+        # Bounded batches still yield to manual requests and position management.
+        bridge.neural_status = {"phase": "warming_up", "reason": "Processing closed market bars"}
+        if brain.last_time is not None and brain.last_time < context["bars"].time[0]:
+            brain.reset()
+        context["encoded"] = brain.observe(context["raw"], context["bars"].time, max_bars=4)
+        ready = context["encoded"] is not None
+        bridge.neural_status = {"phase": "waiting_for_ticks" if ready else "warming_up",
+                               "reason": "neural_context_updated_waiting_for_fresh_ticks" if ready else "neural_warmup",
+                               **getattr(brain, "observation_progress", {})}
+        # Neither warmup nor a blocked entry may bank an old tick impulse.
+        history.clear()
+        updated_context = True
     if gate and not manual:
-        bridge.neural_status = {"phase": "entry_blocked", "reason": gate}
+        history.clear()
+        bridge.neural_status = {"phase": "entry_blocked", "reason": gate,
+                               **getattr(brain, "observation_progress", {})}
         result = {"action": "WAIT", "reason": gate}
         bridge.scalp_status["last_decision"] = result
         return result
@@ -580,17 +597,7 @@ def execution_step(bridge, model_path, memory, expected_login, calendar=None, ex
         fraction = micro.basket_risk if micro else risk.fraction
         deadline = manual["expires_at"]
     else:
-        if context["encoded"] is None:
-            bridge.neural_status = {"phase": "warming_up", "reason": "Processing closed market bars"}
-            if brain.last_time is not None and brain.last_time < context["bars"].time[0]:
-                brain.reset()
-            context["encoded"] = brain.observe(context["raw"], context["bars"].time, max_bars=4)
-            ready = context["encoded"] is not None
-            bridge.neural_status = {"phase": "waiting_for_ticks" if ready else "warming_up",
-                                   "reason": "neural_context_updated_waiting_for_fresh_ticks" if ready else "neural_warmup",
-                                   **getattr(brain, "observation_progress", {})}
-            # Initial graph warmup must never turn an old impulse into an entry.
-            history.clear()
+        if updated_context:
             decision["reason"] = bridge.neural_status["reason"]
             bridge.scalp_status["last_decision"] = decision
             return decision
@@ -648,10 +655,9 @@ def execution_step(bridge, model_path, memory, expected_login, calendar=None, ex
         fraction, deadline = micro.basket_risk, signal["expires_at"]
     if not (manual and manual["check_only"]):
         NewsGate(calendar).check(time.time(), risk.max_hold_bars*60)
-    if manual and micro and micro.entry_policy == "structure":
-        from .market_plan import structure_plan
-        zones = structure_plan(context["bars"], context["structure"], side, bridge.tick(spec.symbol).bid,
-                               context["atr"], spec.tick_size, manual=True)
+    # A manual intent selects the side explicitly. Its volatility/broker plan
+    # must reach the same risk, margin, net-RR and broker checks regardless of
+    # the autonomous profile's signal policy; it is never a learning sample.
     bridge.neural_status = {"phase": "checking_order",
                            "reason": "manual_entry" if manual else "neural_and_structure_entry_accepted",
                            "decision_id": trace["id"] if trace else manual.get("request_id") if manual else None}

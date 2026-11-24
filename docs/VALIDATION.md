@@ -1,5 +1,32 @@
 # Validation record
 
+## v0.7.1 — Manual protection and observation during entry halts — 2026-11-24 (Asia/Kabul)
+
+- Fixed a v0.7.0 regression: an explicit manual BUY/SELL on a structural
+  Micro profile was rejected by the automatic setup planner before broker
+  checking. Manual execution now uses its documented volatility/broker stop
+  and cost-adjusted target. Per-order/basket risk, margin, volume, net RR,
+  calendar, expiry and position ownership checks remain in force.
+- Regression tests cover both manual directions reaching fake `order_check`
+  without neural warmup or an automatic setup, an actual fake-SDK manual fill
+  retaining SL/TP and no learning vector, and unaffordable manual volume being
+  rejected before broker contact. Automatic distant/crossed structural stops
+  remain rejected and now report price/ATR geometry instead of a generic error.
+- Automatic Micro observes valid closed bars in bounded batches even while
+  an entry risk gate is closed. It clears old tick impulses and sends no orders
+  during the halt. User pause/stop and existing-basket management retain priority.
+- Observation telemetry reports processed bars and actual recent-window spike
+  counts. A processed zero-spike window is distinct from uninitialized input;
+  cached bars are not recounted. No firing rates or synaptic weights changed.
+- Local core: **268 tests, 258 passed, 10 environment-dependent skips**.
+  Opt-in scalper suite: **30 passed**, including the actual complete connectome
+  with streamed/batched observation equality and reset/accounting assertions.
+  JavaScript syntax and `git diff --check` passed. Local Chromium could not
+  create its process socket; the hosted release workflow is the browser check.
+- No native MT5 terminal was available here. Broker fakes verify execution
+  logic, not actual fills, profitability or the user's Windows runtime state.
+  Existing profiles and learned weights need no regeneration for this patch.
+
 ## v0.7.0 — Structural execution and observable learning — 2026-11-23 (Asia/Kabul)
 
 - Reproduced the stale neural WAITING phase during automatic basket submission.
