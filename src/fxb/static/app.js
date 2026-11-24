@@ -6,6 +6,23 @@ const scalpReasons = {neural_warmup:'آماده‌سازی مغز با کندل�
 Object.assign(scalpReasons,{operator_stop:'توقف توسط کاربر',basket_risk_halt:'توقف ریسک سبد',basket_missing_protection:'حفاظت SL/TP ناقص',basket_holding_limit:'پایان زمان نگهداری سبد',favorable_quote_pressure_weakened:'محافظت سود پس از ضعف حرکت',basket_capacity:'ظرفیت قابل‌استفاده برای سفارش وجود ندارد',broker_volume_limit:'حد حجم بروکر'});
 Object.assign(scalpReasons,{no_structure_setup:'تیک حرکت دارد؛ تأیید ساختار وجود ندارد',no_structure_target:'هدف نقدینگی معتبر پیدا نشد',structure_stop_distance:'فاصلهٔ ابطال ساختار نامعتبر است',structure_reward_risk:'هدف ساختاری نسبت سود به زیان خالص را پوشش نمی‌دهد',neural_and_structure_entry_accepted:'ورود پس از ارزیابی مغز و ساختار تأیید شد',basket_settled:'سبد تسویه شد؛ نتیجهٔ واقعی ثبت شد'});
 const scalpReason = value => scalpReasons[value] || value || '—';
+scalpReasons.basket_quota='تعداد سفارش‌های سبد بیشتر از سهمیهٔ باقی‌ماندهٔ روز است';
+const guardCodes=['maximum_drawdown','daily_loss','daily_trade_limit'];
+const failureCode = value => {
+  const code=value?.reason_code||value?.error?.code, reason=value?.error?.reason||value?.reason;
+  // Old persisted receipts used basket_quota for every risk halt. The stored
+  // reason is more precise; an update must also explain those existing receipts.
+  return ['basket_quota','basket_capacity'].includes(code)&&guardCodes.includes(reason)?reason:code||reason;
+};
+const limitDiagnostic = (code,limits) => {
+  if(!limits)return '';
+  const currency=limits.currency||'';
+  if(code==='basket_quota'||code==='daily_trade_limit')return ` | ورود امروز ${num(limits.entries_today)} · سقف روز ${limits.daily_entry_limit===0?'نامحدود':num(limits.daily_entry_limit)} · ظرفیت باقی‌مانده ${limits.daily_entries_remaining==null?'نامحدود':num(limits.daily_entries_remaining)} · روز ${limits.risk_day} کابل`;
+  const daily=code==='daily_loss';
+  if(!daily&&code!=='maximum_drawdown')return '';
+  const base=daily?limits.day_start_equity:limits.peak_equity, floor=daily?limits.daily_loss_floor:limits.drawdown_floor;
+  return ` | سرمایه ${num(limits.equity,2)} · ${daily?'سرمایهٔ ابتدای روز':'بیشترین سرمایهٔ ثبت‌شده'} ${num(base,2)} · آستانهٔ توقف ${num(floor,2)} ${currency}. توقف ثبت‌شده با افزایش موجودی خودکار پاک نمی‌شود.`;
+};
 const structureDiagnostic = d => d?.stage==='structure_validation'
   ? ` · ${d.failure==='crossed'?'سطح ابطال پیش از ورود شکسته است':'حد ضرر ساختاری بیش از حد دور است'} · قیمت ${num(d.bid,3)} · SL ${num(d.stop_bid,3)} · فاصله ${num(d.distance_price,3)} (${num(d.distance_atr,2)} ATR) / حداکثر ${num(d.max_distance_price,3)}` : '';
 const hash = new URLSearchParams(location.hash.slice(1));
@@ -52,8 +69,9 @@ function render(s){
   const initializing=neural.phase==='warming_up'&&neural.remaining_bars==null;
   const enginePhase=worker.phase==='failed'?'FAILED':worker.phase==='blocked'?'BLOCKED':!s.running?'STANDBY':worker.phase==='stopping'?'STOPPING':neural.phase==='submitting'?'SUBMITTING':neural.phase==='managing_positions'?'MANAGING':neural.phase==='checking_order'?'CHECKING':!s.entries_enabled?'PAUSED':neural.phase==='entry_blocked'?'BLOCKED':neural.phase==='warming_up'?(initializing?'INITIALIZING':'WARMUP'):worker.phase==='starting'?'STARTING':worker.phase==='waiting'?'WAITING':'RUNNING';
   $('engine-state').textContent=enginePhase;
-  $('engine-detail').textContent=s.running?`${s.mode.toUpperCase()} · ${scalpReason(worker.reason||neural.reason||'')}${worker.cycle_completed_at?' · '+kabTime(worker.cycle_completed_at)+' کابل':''}`:(worker.reason||'منتظر اتصال و انتخاب مدل');
+  $('engine-detail').textContent=s.running?`${s.mode.toUpperCase()} · ${scalpReason(failureCode(worker)||failureCode(neural)||'')}${worker.cycle_completed_at?' · '+kabTime(worker.cycle_completed_at)+' کابل':''}`:(worker.reason||'منتظر اتصال و انتخاب مدل');
   if(s.running)$('engine-detail').textContent+=structureDiagnostic(worker.details||s.scalper?.last_decision?.details||neural.details);
+  if(s.running)$('engine-detail').textContent+=limitDiagnostic(failureCode(worker)||failureCode(neural),worker.details?.limits||s.scalper?.last_decision?.details?.limits);
   $('run-badge').textContent=s.running?s.mode.toUpperCase():'STOPPED';
   const error=s.error||(s.job.status==='failed'?s.job.error:null);$('system-alert').hidden=!error;$('system-alert').textContent=error||'';
   const manifest=s.brain.manifest;
@@ -99,7 +117,9 @@ function render(s){
   $('manual-send').disabled=$('manual-check').disabled||s.mode==='dry-run';
   $('manual-summary').textContent=`حساب ${a?.login||'—'} · ${s.mode.toUpperCase()} · حجم کل انتخاب‌شده ${(Number($('manual-form').elements.lot.value)*Number($('manual-form').elements.count.value)).toFixed(2)} لات. بررسی، سفارش باز نمی‌کند؛ ارسال دستی سفارش واقعی به همین حساب می‌فرستد.`;
   if(manual)$('manual-result').textContent=JSON.stringify(manual,null,2);
-  $('manual-status').textContent=manual?`${manual.status.toUpperCase()} · ${scalpReason(manual.reason_code||manual.error?.code||manual.error?.reason||manual.reason||'')}${manual.broker?' · MT5 '+manual.broker.retcode+' · '+manual.broker.comment:''}`:'بررسی اتصال: ابتدا یک سفارش ۰٫۰۱ لات را با «بررسی بدون ارسال» بررسی کنید.';
+  $('manual-status').textContent=manual?`${manual.status.toUpperCase()} · ${scalpReason(failureCode(manual)||'')}${manual.broker?' · MT5 '+manual.broker.retcode+' · '+manual.broker.comment:''}`:'بررسی اتصال: ابتدا یک سفارش ۰٫۰۱ لات را با «بررسی بدون ارسال» بررسی کنید.';
+  if(manual)$('manual-status').textContent+=limitDiagnostic(failureCode(manual),manual.details?.limits||manual.error?.details?.limits);
+  if(manual?.status==='blocked'&&['maximum_drawdown','daily_loss'].includes(failureCode(manual))&&a?.mode==='demo')$('manual-status').textContent+=' اگر دمو را شارژ مجدد کرده‌اید، پس از پایان سبد و خاموش‌کردن موتور از «بررسی شروع دورهٔ جدید دمو» استفاده کنید.';
   if(manual)$('manual-status').textContent+=structureDiagnostic(manual.details||manual.error?.details);
   if(manual?.plan)$('manual-status').textContent+=` | SL ${num(manual.plan.sl,3)} · TP ${num(manual.plan.tp,3)} · نسبت سود به زیان خالص ${num(manual.plan.net_reward_risk,2)} · ${manual.plan.protection_source==='confirmed_structure'?'حدود ساختاری':'حدود نوسان و بروکر'}`;
   if(manual?.reason_code==='fixed_lot_budget'&&manual.details){const z=manual.details;$('manual-status').textContent+=` | ریسک سفارش ${num(z.risk_cash,2)} / بودجه ${num(z.risk_budget_cash,2)} ${z.currency}.`;if(z.minimum_equity_for_selected_risk!=null)$('manual-status').textContent+=` ریسک کل انتخاب‌شده ${num(z.total_risk_cash,2)}؛ حداقل سرمایهٔ محاسباتی با همین حدود ${num(z.minimum_equity_for_selected_risk,2)} ${z.currency}، با فرض رفع توقف‌های قبلی. این برآورد با قیمت تغییر می‌کند.`;}

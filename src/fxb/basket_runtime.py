@@ -40,16 +40,33 @@ def order_cost(bridge, request, spec):
     return -loss+fees, gain-fees, margin
 
 
+def entry_limits(account, guard, risk):
+    """Explain an entry halt without clearing it or changing the chosen risk."""
+    return {"equity": account.equity, "currency": account.currency,
+            "day_start_equity": guard.day_start, "peak_equity": guard.peak,
+            "daily_loss_floor": guard.day_start*(1-risk.daily_loss),
+            "drawdown_floor": guard.peak*(1-risk.max_drawdown),
+            "daily_loss_limit_percent": 100*risk.daily_loss,
+            "drawdown_limit_percent": 100*risk.max_drawdown,
+            "daily_halt_latched": guard.daily_halt, "drawdown_halt_latched": guard.total_halt,
+            "entries_today": guard.entries, "daily_entry_limit": risk.max_trades,
+            "daily_entries_remaining": max(0, risk.max_trades-guard.entries) if risk.max_trades else None,
+            "risk_day": guard.day, "timezone": "Asia/Kabul"}
+
+
 def budget_check(account, guard, risk, risk_cash, margin_cash, count, fraction):
     available = min(account.equity*fraction,
                     account.equity-guard.day_start*(1-risk.daily_loss),
                     account.equity-guard.peak*(1-risk.max_drawdown))
     detail = {"requested_orders": count, "total_risk_cash": risk_cash,
               "risk_budget_cash": max(0., available), "total_margin_cash": margin_cash,
-              "margin_budget_cash": account.margin_free*risk.margin_fraction, "currency": account.currency}
+              "margin_budget_cash": account.margin_free*risk.margin_fraction, "currency": account.currency,
+              "limits": entry_limits(account, guard, risk)}
     reason = guard.reason(risk)
-    if reason or (risk.max_trades and guard.entries+count > risk.max_trades):
-        raise Blocked(reason or "Basket exceeds remaining daily entry quota", code="basket_quota", details=detail)
+    if reason:
+        raise Blocked(reason, code=reason, details=detail)
+    if risk.max_trades and guard.entries+count > risk.max_trades:
+        raise Blocked("Basket exceeds remaining daily entry quota", code="basket_quota", details=detail)
     if risk_cash > available+1e-8 or margin_cash > account.margin_free*risk.margin_fraction+1e-8:
         raise Blocked("Entire requested basket exceeds risk or margin budget", code="basket_budget", details=detail)
     return detail
@@ -177,7 +194,8 @@ def request_plan(bridge, account, guard, spec, risk, side, atr, lot, count, frac
                            "limiting_factors": [k for k, n in limits.items() if n == count]}
         if count < 1:
             raise Blocked(guard.reason(risk) or "No order fits the remaining basket capacity",
-                          code="basket_capacity", details=capacity_detail)
+                          code=guard.reason(risk) or "basket_capacity",
+                          details=capacity_detail | {"limits": entry_limits(account, guard, risk)})
     if broker_count is not None and count > broker_count:
         raise Blocked("Basket exceeds broker directional volume limit", code="broker_volume_limit",
                       details={"requested_orders": count, "available_orders": broker_count})
@@ -564,6 +582,7 @@ def execution_step(bridge, model_path, memory, expected_login, calendar=None, ex
     gate = (guard.reason(risk) or ("uncertain_order_requires_reconciliation" if memory.unresolved() else
             "account_has_exposure" if positions or pending else ""))
     bridge.scalp_status["entry_gate"] = gate
+    bridge.scalp_status["entry_limits"] = entry_limits(account, guard, risk)
     updated_context = False
     if not manual and context["encoded"] is None:
         # Entry permission must not disable observation of valid market data.
@@ -583,7 +602,7 @@ def execution_step(bridge, model_path, memory, expected_login, calendar=None, ex
         history.clear()
         bridge.neural_status = {"phase": "entry_blocked", "reason": gate,
                                **getattr(brain, "observation_progress", {})}
-        result = {"action": "WAIT", "reason": gate}
+        result = {"action": "WAIT", "reason": gate, "details": {"limits": bridge.scalp_status["entry_limits"]}}
         bridge.scalp_status["last_decision"] = result
         return result
     micro = MicroConfig(**meta["micro_config"]) if cfg.style == "micro" else None

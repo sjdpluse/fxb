@@ -109,6 +109,26 @@ class BrowserTests(unittest.TestCase):
                                            'equity':100.,'balance':100.,'profit':0.,'updated_at':time.time()}
                         expect(page.locator('#demo-session-panel')).to_be_visible()
                         expect(page.locator('#demo-session-preview')).to_be_disabled()
+                        # Persisted v0.7.1 receipts must expose the real guard
+                        # reason even though their old code says basket_quota.
+                        status['manual_order']={'status':'blocked','reason_code':'basket_quota','reason':'maximum_drawdown'}
+                        expect(page.locator('#manual-status')).to_contain_text('حد افت سرمایه')
+                        expect(page.locator('#manual-status')).not_to_contain_text('basket_quota')
+                        expect(page.locator('#manual-status')).to_contain_text('شارژ مجدد')
+                        limits={'equity':100.,'currency':'USD','day_start_equity':200.,'peak_equity':500.,
+                            'daily_loss_floor':194.,'drawdown_floor':460.,'entries_today':248,
+                            'daily_entry_limit':250,'daily_entries_remaining':2,'risk_day':'2026-11-24'}
+                        status['manual_order']={'status':'blocked','reason_code':'daily_loss','reason':'daily_loss',
+                                               'details':{'limits':limits}}
+                        expect(page.locator('#manual-status')).to_contain_text('194.00')
+                        status['account']['mode']='live'
+                        expect(page.locator('#manual-status')).not_to_contain_text('دورهٔ جدید دمو')
+                        status['account']['mode']='demo'
+                        status['manual_order']={'status':'blocked','reason_code':'basket_quota',
+                            'reason':'Basket exceeds remaining daily entry quota','details':{'limits':limits}}
+                        expect(page.locator('#manual-status')).to_contain_text('سهمیهٔ باقی‌مانده')
+                        expect(page.locator('#manual-status')).to_contain_text('ورود امروز 248')
+                        expect(page.locator('#manual-status')).to_contain_text('ظرفیت باقی‌مانده 2')
                         status.update(running=False,entries_enabled=False)
                         status['worker']={'phase':'stopped','reason':None}
                         status['manual_order']={'status':'blocked','reason_code':'fixed_lot_budget',

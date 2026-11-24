@@ -1,5 +1,30 @@
 # Validation record
 
+## v0.7.2 — Preserve the actual account-halt reason — 2026-11-24 (Asia/Kabul)
+
+- Reproduced the misleading `basket_quota` label: the budget gate used it for
+  maximum drawdown, daily loss, exhausted daily count and batch count overflow.
+  Risk halts now retain their exact reason codes. `basket_quota` is reserved
+  for a requested basket larger than the remaining daily count allowance.
+  Zero-capacity failures also retain a pre-existing guard halt reason.
+- Rejections include current equity, peak/day-start baselines, stop thresholds,
+  latched flags, daily count allowance and the Kabul risk day. The UI explains
+  persisted older receipts by their original reason, including receipts where
+  the stored code is still `basket_quota`. Demo-period recovery guidance is
+  shown only for demo accounts; no period reset is performed automatically.
+- Local suite: **273 tests, 263 passed, 10 environment-dependent skips**.
+  New regressions cover both latched halts after equity recovery, exhausted
+  versus partially remaining count quotas, unlimited daily count with risk
+  protection intact, zero-capacity halt diagnostics and manual/autonomous
+  blocking without an order submission or broker order check. Existing demo
+  session tests preserve learning/history and reject Live or exposed accounts.
+- JavaScript syntax and whitespace checks passed. Hosted Chromium tests cover
+  old receipts, numerical limits and demo-only recovery wording. No biological
+  dynamics, learned weights, risk limits or account state were changed.
+- The user's specific active guard cannot be inferred from `basket_quota`
+  alone. It still requires their local current reason/status; no native MT5
+  terminal or actual trade was operated by this development session.
+
 ## v0.7.1 — Manual protection and observation during entry halts — 2026-11-24 (Asia/Kabul)
 
 - Fixed a v0.7.0 regression: an explicit manual BUY/SELL on a structural
