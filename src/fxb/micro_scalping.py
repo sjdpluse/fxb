@@ -23,6 +23,7 @@ class MicroConfig:
     giveback_fraction: float = .35
     entry_policy: str = "momentum"
     lot_mode: str = "fixed"
+    direction_policy: str = "tick_count"
 
     def __post_init__(self):
         if type(self.orders) is not int or not 5 <= self.orders <= 10:
@@ -36,6 +37,8 @@ class MicroConfig:
             raise ValueError("Unknown basket sizing or exit policy")
         if self.entry_policy not in ("momentum", "structure") or self.lot_mode not in ("fixed", "risk"):
             raise ValueError("Unknown entry or lot policy")
+        if self.direction_policy not in ("tick_count", "price_path"):
+            raise ValueError("Unknown Micro direction policy")
         if (type(self.min_hold_seconds) is not int or not 5 <= self.min_hold_seconds <= 120
                 or type(self.confirmation_seconds) is not int or not 2 <= self.confirmation_seconds <= 15
                 or type(self.profit_arm_r) not in (int, float) or not .25 <= self.profit_arm_r <= 2
@@ -67,27 +70,72 @@ def quote_pressure(history, tick, now):
     velocity = ((bid-short[0][1])/(t-short[0][0])
                 if len(short) >= 2 and t-short[0][0] >= .3 else 0.)
     movement = bid-history[0][1]
+    path_length = math.fsum(abs(d) for d in moves)
     return {"time": t, "bid": bid, "ask": ask, "spread": ask-bid,
             "movement": movement, "velocity": velocity,
             "imbalance": sum(1 if d > 0 else -1 for d in moves)/len(moves),
+            "directional_efficiency": max(-1., min(1., movement/path_length)),
+            "path_length": path_length,
+            "up_moves": sum(d > 0 for d in moves), "down_moves": sum(d < 0 for d in moves),
             "duration": t-history[0][0], "samples": len(history)}
 
 
-def micro_signal(pressure, atr, tick_size, cost_price):
-    if pressure is None or not math.isfinite(atr) or atr <= 0:
-        return None
+def assess_micro_signal(pressure, atr, tick_size, cost_price, direction_policy="tick_count"):
+    """Return a trigger and its exact measured checks, not a win probability.
+
+    Legacy profiles retain count voting. Price-path profiles compare the net
+    displacement with total bid travel: small counter-moves do not get the
+    same vote as large moves, but a choppy path still fails. This measures quote
+    movement, not traded volume or exchange order flow.
+    """
+    if direction_policy not in ("tick_count", "price_path"):
+        raise ValueError("Unknown Micro direction policy")
+    audit = {"direction_policy": direction_policy, "ready": False,
+             "reason": "micro_waiting_for_quote_momentum", "failed_checks": []}
+    if pressure is None:
+        return None, audit
     p = pressure
+    numbers = [atr, tick_size, cost_price] + [p.get(k) for k in
+        ("movement", "imbalance", "velocity", "spread", "time", "bid", "ask")]
+    try:
+        valid = all(math.isfinite(x) for x in numbers) and atr > 0 and tick_size > 0 and cost_price >= 0 and p["spread"] >= 0
+    except (TypeError, ValueError):
+        valid = False
+    if not valid:
+        return None, audit | {"reason": "micro_invalid_measurement", "failed_checks": ["micro_invalid_measurement"]}
+    efficiency = p.get("directional_efficiency")
+    if type(efficiency) not in (int, float) or not math.isfinite(efficiency) or not -1 <= efficiency <= 1:
+        efficiency = None
+    if direction_policy == "price_path" and efficiency is None:
+        return None, audit | {"reason": "micro_missing_price_path", "failed_checks": ["micro_missing_price_path"]}
     # Movement must overcome current spread and configured friction; no quota
     # forces a trade when quotes have no economically meaningful movement.
     threshold = max(.05*atr, 1.25*p["spread"]+cost_price, 3*tick_size)
     side = 1 if p["movement"] > 0 else -1
-    if (abs(p["movement"]) < threshold or abs(p["movement"]) > atr
-            or side*p["imbalance"] < .60 or side*p["velocity"] <= tick_size/2):
-        return None
+    alignment = side*(p["imbalance"] if direction_policy == "tick_count" else efficiency)
+    checks = [("micro_movement_below_costs", abs(p["movement"]) >= threshold),
+              ("micro_movement_extended", abs(p["movement"]) <= atr),
+              ("micro_direction_count" if direction_policy == "tick_count" else "micro_direction_price_path", alignment >= .60),
+              ("micro_velocity_mismatch", side*p["velocity"] > tick_size/2)]
+    failed = [code for code, passed in checks if not passed]
+    audit.update(ready=not failed, reason=failed[0] if failed else "micro_momentum_accepted", failed_checks=failed,
+                 quote_time=p["time"], path_length=p.get("path_length"),
+                 up_moves=p.get("up_moves"), down_moves=p.get("down_moves"),
+                 side=side, movement=p["movement"], atr=atr, spread=p["spread"], cost_price=cost_price,
+                 minimum_movement=threshold, maximum_movement=atr, directionality=alignment, minimum_directionality=.60,
+                 count_directionality=side*p["imbalance"], price_directionality=side*efficiency if efficiency is not None else None,
+                 velocity=side*p["velocity"], minimum_velocity=tick_size/2,
+                 samples=p.get("samples"), duration=p.get("duration"))
+    if failed:
+        return None, audit
     return {"side": side, "kind": "micro_momentum", "score": .60,
             "setup_id": f"micro:{int(p['time']*1000)}:{side}",
             "expires_at": p["time"]+3, "pressure": p,
-            "entry_reference": p["ask"] if side > 0 else p["bid"]}
+            "entry_reference": p["ask"] if side > 0 else p["bid"]}, audit
+
+
+def micro_signal(pressure, atr, tick_size, cost_price, direction_policy="tick_count"):
+    return assess_micro_signal(pressure, atr, tick_size, cost_price, direction_policy)[0]
 
 
 def weakening(group, pressure, estimated_net, now, tick_value_cash):

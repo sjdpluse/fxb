@@ -6,6 +6,16 @@ const scalpReasons = {neural_warmup:'آماده‌سازی مغز با کندل�
 Object.assign(scalpReasons,{operator_stop:'توقف توسط کاربر',basket_risk_halt:'توقف ریسک سبد',basket_missing_protection:'حفاظت SL/TP ناقص',basket_holding_limit:'پایان زمان نگهداری سبد',favorable_quote_pressure_weakened:'محافظت سود پس از ضعف حرکت',basket_capacity:'ظرفیت قابل‌استفاده برای سفارش وجود ندارد',broker_volume_limit:'حد حجم بروکر'});
 Object.assign(scalpReasons,{no_structure_setup:'تیک حرکت دارد؛ تأیید ساختار وجود ندارد',no_structure_target:'هدف نقدینگی معتبر پیدا نشد',structure_stop_distance:'فاصلهٔ ابطال ساختار نامعتبر است',structure_reward_risk:'هدف ساختاری نسبت سود به زیان خالص را پوشش نمی‌دهد',neural_and_structure_entry_accepted:'ورود پس از ارزیابی مغز و ساختار تأیید شد',basket_settled:'سبد تسویه شد؛ نتیجهٔ واقعی ثبت شد'});
 const scalpReason = value => scalpReasons[value] || value || '—';
+Object.assign(scalpReasons,{
+  micro_movement_below_costs:'حرکت قیمت هنوز هزینهٔ ورود را پوشش نمی‌دهد',
+  micro_movement_extended:'حرکت کوتاه‌مدت از یک ATR بیشتر شده است',
+  micro_direction_count:'تعداد تیک‌های هم‌جهت کافی نیست',
+  micro_direction_price_path:'حرکت خالص نسبت به رفت‌وبرگشت قیمت کافی نیست',
+  micro_velocity_mismatch:'سرعت اخیر با جهت حرکت هم‌سو نیست',
+  micro_invalid_measurement:'اندازه‌گیری حرکت قیمت نامعتبر است',
+  micro_missing_price_path:'دادهٔ مسیر قیمت برای ارزیابی کافی نیست',
+  micro_momentum_accepted:'شرط حرکت قیمت تأیید شد؛ سایر شروط ورود جدا بررسی می‌شوند'
+});
 scalpReasons.basket_quota='تعداد سفارش‌های سبد بیشتر از سهمیهٔ باقی‌ماندهٔ روز است';
 const guardCodes=['maximum_drawdown','daily_loss','daily_trade_limit'];
 const failureCode = value => {
@@ -53,6 +63,24 @@ document.querySelector('.brand').addEventListener('click',e=>{e.preventDefault()
 document.querySelectorAll('[data-action]').forEach(el=>el.addEventListener('click',async()=>{el.disabled=true;try{await command(el.dataset.action);}catch{}finally{el.disabled=false;}}));
 function table(headers,rows,empty){return rows.length?`<table><thead><tr>${headers.map(h=>`<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${r.map(c=>`<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table>`:`<div class="empty">${esc(empty)}</div>`;}
 const kabTime=t=>new Date(t*1000).toLocaleTimeString('en-GB',{timeZone:'Asia/Kabul',hour12:false});
+function renderMomentum(scalp){
+  const el=$('momentum-diagnostics'),m=scalp?.momentum||scalp?.last_decision?.details?.momentum;
+  el.hidden=!m;
+  if(!m){el.innerHTML='';return;}
+  if(m.minimum_movement==null){el.textContent=scalpReason(m.reason);return;}
+  const pricePath=m.direction_policy==='price_path';
+  const directionCode=pricePath?'micro_direction_price_path':'micro_direction_count';
+  const rows=[
+    ['حرکت برای پوشش هزینه‌ها',num(Math.abs(m.movement),3),'≥ '+num(m.minimum_movement,3),'micro_movement_below_costs'],
+    ['فاصلهٔ حرکت از نوسان M1',num(Math.abs(m.movement),3),'≤ '+num(m.maximum_movement,3),'micro_movement_extended'],
+    [pricePath?'غلبهٔ اندازهٔ حرکت':'غلبهٔ تعداد تیک',num(m.directionality*100,1)+'%','≥ '+num(m.minimum_directionality*100,1)+'%',directionCode],
+    ['سرعت در جهت حرکت',num(m.velocity,3),'> '+num(m.minimum_velocity,3),'micro_velocity_mismatch']
+  ].map(([label,value,limit,code])=>[esc(label),esc(value),esc(limit),
+    (m.failed_checks||[]).includes(code)?'<span class="negative">WAIT</span>':'<span class="positive">PASS</span>']);
+  el.innerHTML=`<p dir="rtl">${esc(scalpReason(m.reason))} · ${pricePath?'PRICE PATH':'TICK COUNT'} · ${m.side===1?'BUY':'SELL'} · ${esc(kabTime(m.quote_time))} کابل</p>`+
+    table(['شرط حرکت قیمت','اندازه‌گیری','شرط لازم','نتیجه'],rows,'')+
+    `<p class="compact muted" dir="rtl">${esc(num(m.samples))} نمونه در ${esc(num(m.duration,2))} ثانیه · تغییر خالص قیمت ${esc(num(m.movement,3))} · اسپرد ${esc(num(m.spread,3))} · هزینهٔ فرضی رفت‌وبرگشت ${esc(num(m.cost_price,3))}. غلبهٔ اندازهٔ حرکت = حرکت خالص در جهت بررسی / مجموع تغییرات مطلق قیمت؛ حجم معاملات بازار نیست. تأیید این جدول به‌تنهایی مجوز سفارش نیست.</p>`;
+}
 function render(s){
   snapshot=s;$('version').textContent='v'+s.version;$('preview-badge').hidden=!s.preview;
   $('connection').textContent=s.connected?`MT5 · ${s.account?.mode?.toUpperCase()||'CONNECTED'}`:'MT5 DISCONNECTED';$('connection').className='badge '+(s.connected?'green':'');
@@ -98,9 +126,10 @@ function render(s){
   const checks=[['کانکتوم کامل',!!manifest,manifest?'138,639 neurons · full graph':'نصب از تنظیمات'],['ترمینال معاملاتی',s.connected,s.connected?`${a.login} / ${a.mode}`:'Windows MT5 required'],['مدل با دادهٔ واقعی',s.models.some(m=>!m.synthetic),`${s.models.filter(m=>!m.synthetic).length} profiles`],['تقویم ورود',s.news.ready,s.news.ready?'Fresh coverage':'نیاز به تقویم معتبر']];
   $('readiness').innerHTML=checks.map(([name,ok,detail])=>`<div>${esc(name)}<b class="${ok?'ok':''}">${ok?'READY':'PENDING'}</b><small>${esc(detail)}</small></div>`).join('');
   const modelKey=JSON.stringify(s.models);if(modelKey!==oldModels){oldModels=modelKey;const checked=new Set([...document.querySelectorAll('[name=models]:checked')].map(el=>el.value));$('models-table').innerHTML=table(['MODEL / SYMBOL','ENCODER','SOURCE','TRADES','WIN RATE','RETURN','MAX DD','PROFIT FACTOR'],s.models.map(m=>{const h=m.holdout||{};return[esc(m.name)+'<br>'+esc(m.symbol),esc(m.encoder),`<span class="badge ${m.synthetic?'amber':'green'}">${m.synthetic?'SYNTHETIC':m.strategy?'ONLINE · NO HOLDOUT':'MARKET DATA'}</span>`,num(h.trades),h.win_rate==null?'—':num(h.win_rate*100,1)+'%',h.return_pct==null?'—':num(h.return_pct,2)+'%',h.max_drawdown_pct==null?'—':num(h.max_drawdown_pct,2)+'%',num(h.profit_factor,2)];}),'هنوز مدلی آموزش داده نشده است. نتایج پس از آموزش نمایش داده می‌شوند.');
-    $('model-choices').innerHTML=s.models.length?s.models.map(m=>`<label class="model-choice"><input type="checkbox" name="models" value="${esc(m.path)}" ${checked.has(m.path)?'checked':''}><span>${esc(m.symbol)} / ${esc(m.name)}<small>${esc(m.encoder)} · ${m.synthetic?'SYNTHETIC — dry run only':m.strategy?`M1 ${(m.scalp_style||'structure').toUpperCase()} · ${num(m.risk.fraction*100,2)}% risk · ${m.risk.max_trades===0?'∞':num(m.risk.max_trades)}/day${m.micro_config?.sizing_mode==='capacity'?' · AUTO':''}${m.micro_config?.exit_policy==='confirmed'?' · PATIENT':''}${m.micro_config?.entry_policy==='structure'?' · STRUCTURE':''}${m.micro_config?.lot_mode==='risk'?' · RISK LOT':''}`:'REAL MARKET DATA'}</small></span></label>`).join(''):'مدل آموزش‌دیده‌ای موجود نیست.';}
+    $('model-choices').innerHTML=s.models.length?s.models.map(m=>`<label class="model-choice"><input type="checkbox" name="models" value="${esc(m.path)}" ${checked.has(m.path)?'checked':''}><span>${esc(m.symbol)} / ${esc(m.name)}<small>${esc(m.encoder)} · ${m.synthetic?'SYNTHETIC — dry run only':m.strategy?`M1 ${(m.scalp_style||'structure').toUpperCase()} · ${num(m.risk.fraction*100,2)}% risk · ${m.risk.max_trades===0?'∞':num(m.risk.max_trades)}/day${m.micro_config?.sizing_mode==='capacity'?' · AUTO':''}${m.micro_config?.exit_policy==='confirmed'?' · PATIENT':''}${m.micro_config?.entry_policy==='structure'?' · STRUCTURE':''}${m.micro_config?.lot_mode==='risk'?' · RISK LOT':''}${m.micro_config?.direction_policy==='price_path'?' · PRICE PATH':''}`:'REAL MARKET DATA'}</small></span></label>`).join(''):'مدل آموزش‌دیده‌ای موجود نیست.';}
   $('micro-upgrade-button').disabled=upgradeBusy||s.running||s.preview||s.job.status==='running';
   const scalp=s.scalper;
+  renderMomentum(scalp);
   if(scalp){const l=scalp.learning||{},t=scalp.structure||{},d=scalp.last_decision||{},r=scalp.risk||{},stats=scalp.activity_stats||{};
     $('scalp-status').className='pad';$('scalp-status').innerHTML=table(['SYMBOL','SWING HIGH / LOW','M5 BIAS','LEARNED BASKETS / TRADES','REALIZED NET','LAST DECISION'],[[esc(scalp.symbol),num(t.swing_high,2)+' / '+num(t.swing_low,2),esc(t.m5_bias??'—'),num(l.samples),num(l.net_cashflow,2)+' '+esc(a?.currency||''),esc(d.action||'WAIT')+' · '+esc(scalpReason(d.reason_code||d.reason))]],'');
     $('scalp-limits').textContent=`${(scalp.style||'structure').toUpperCase()} · ریسک هر معامله ${num(r.fraction*100,2)}٪ (${num(scalp.risk_budget_cash,2)} ${a?.currency||''}) · حد زیان روزانه ${num(r.daily_loss*100,1)}٪ · ورود امروز ${num(scalp.entries_today)} / ${r.max_trades===0?'بدون سقف تعداد':num(r.max_trades)} · ${scalp.style==='micro'?`یک سبد هم‌زمان · ${scalp.micro_config?.sizing_mode==='capacity'?'تعداد خودکار':num(scalp.micro_config?.orders)} × ${scalp.micro_config?.lot_mode==='risk'?'حجم از بودجهٔ ریسک':num(scalp.micro_config?.lot,2)+' لات'} · ریسک کل سبد ${num((scalp.micro_config?.basket_risk||0)*100,2)}٪`:'یک موقعیت هم‌زمان'} · امتیاز ورود احتمال برد نیست.`;
@@ -108,7 +137,7 @@ function render(s){
     let detail=`کندل‌های بررسی‌شدهٔ امروز: ${num(stats.bars||0)} · کندل‌های دارای فرصت: ${num(stats.signal_bars||0)}. ${reasons}`;
     if(scalp.entry_gate)detail+=` | مانع فعلی ورود: ${scalpReason(scalp.entry_gate)}. سقف سرمایهٔ ثبت‌شده ${num(scalp.risk_peak_equity,2)} و سرمایهٔ ابتدای روز ${num(scalp.day_start_equity,2)} ${a?.currency||''}.`;
     if(d.sizing&&d.sizing.minimum_lot!=null){const z=d.sizing;detail+=` | حداقل لات ${num(z.minimum_lot,2)}: زیان محاسبه‌شده تا حد ضرر و هزینه‌ها ${num(z.minimum_lot_risk_cash,2)} ${z.currency} (${num(z.minimum_lot_risk_percent,2)}٪ سرمایه)، بودجهٔ انتخاب‌شده ${num(z.risk_budget_cash,2)} ${z.currency}. مارجین لازم ${num(z.minimum_lot_margin_cash,2)} / بودجهٔ مارجین ${num(z.margin_budget_cash,2)} ${z.currency}.`;}
-    if(scalp.style==='micro'){detail+=` | فشار تیک: ${num(scalp.pressure?.velocity,3)} / ثانیه · پوزیشن‌های سبد: ${num(d.open_positions)} · خالص تخمینی خروج: ${num(d.estimated_liquidation_net,2)} ${a?.currency||''}`;} detail+=' | آخرین پاداش: '+num(l.last_reward_r,3)+'R · میانگین پاداش: '+num(l.samples?l.sum_r/l.samples:null,3)+'R · نسخهٔ یادگیری: '+num(l.revision)+' · تغییر وزن: '+num(l.last_weight_delta,6); if(d.exit_diagnostics){const x=d.exit_diagnostics;detail+=' | محافظت سود: '+(x.armed?'آماده':'در انتظار سود معنادار')+' · سود لازم '+num(x.arm_net_cash,2)+' · اوج سود '+num(x.peak_net_cash,2)+' · برگشت لازم '+num(x.required_giveback_cash,2);} const plan=d.plan||scalp.basket?.plan;if(plan?.count_limits)detail+=' | ظرفیت محاسبه‌شده: '+num(plan.requested_orders)+' · عامل محدودکننده: '+plan.limiting_factors.join(', '); if(d.details)detail+=' | '+JSON.stringify(d.details); if(d.error)detail+=' | '+JSON.stringify(d.error); $('scalp-diagnostics').textContent=detail;
+    if(scalp.style==='micro'){detail+=` | فشار تیک: ${num(scalp.pressure?.velocity,3)} / ثانیه · پوزیشن‌های سبد: ${num(d.open_positions)} · خالص تخمینی خروج: ${num(d.estimated_liquidation_net,2)} ${a?.currency||''}`;} detail+=' | آخرین پاداش: '+num(l.last_reward_r,3)+'R · میانگین پاداش: '+num(l.samples?l.sum_r/l.samples:null,3)+'R · نسخهٔ یادگیری: '+num(l.revision)+' · تغییر وزن: '+num(l.last_weight_delta,6); if(d.exit_diagnostics){const x=d.exit_diagnostics;detail+=' | محافظت سود: '+(x.armed?'آماده':'در انتظار سود معنادار')+' · سود لازم '+num(x.arm_net_cash,2)+' · اوج سود '+num(x.peak_net_cash,2)+' · برگشت لازم '+num(x.required_giveback_cash,2);} const plan=d.plan||scalp.basket?.plan;if(plan?.count_limits)detail+=' | ظرفیت محاسبه‌شده: '+num(plan.requested_orders)+' · عامل محدودکننده: '+plan.limiting_factors.join(', '); if(d.details){const {momentum,...otherDetails}=d.details;if(Object.keys(otherDetails).length)detail+=' | '+JSON.stringify(otherDetails);} if(d.error)detail+=' | '+JSON.stringify(d.error); $('scalp-diagnostics').textContent=detail;
   }else{$('scalp-limits').textContent='حدود ریسک از پروفایل فعال خوانده می‌شود.';$('scalp-diagnostics').textContent='';}
   const manual=s.manual_order, pending=manual&&['queued','processing'].includes(manual.status);
   const m1=s.active_models.length===1&&s.models.some(m=>m.path===s.active_models[0]&&m.strategy);

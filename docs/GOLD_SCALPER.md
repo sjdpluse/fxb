@@ -46,13 +46,33 @@ that context, not pretrained general market intelligence.
 
 Micro polls at 0.5 seconds **plus** MT5/API/computation latency. It keeps up to
 eight seconds of distinct bid quotes, requires at least four samples over one
-second, 60% directional imbalance and favorable recent velocity. Movement must
+second, 60% directional efficiency and favorable recent velocity. As of 0.8.0,
+new or explicitly upgraded profiles use `direction_policy=price_path`: signed
+net bid displacement divided by the sum of absolute bid changes. The sign is
+aligned with the proposed trade. Existing profiles without this field retain
+`tick_count`, the number-based imbalance (up moves minus down moves divided by
+nonzero moves), so installing the update alone does not change their entries.
+Equal counts can still represent a directional path if the price changes in
+one direction are larger. Equal net movement with excessive back-and-forth
+travel still fails. Neither measure is exchange volume or order flow.
+
+Movement must
 exceed the greater of 0.05 ATR, three ticks, or 1.25 spreads plus configured
 round-trip commission/slippage, and must not already exceed one ATR. Duplicate,
 stale or disconnected quotes cannot build a signal. A signal expires after
 three seconds; graph warmup clears tick history and waits for a fresh signal.
 This measures quote momentum, not exchange volume/order-flow, and does not
 promise to capture every fluctuation or provide low-latency HFT execution.
+
+Execution shows each measured momentum condition and its threshold: minimum
+cost-covering movement, maximum one-ATR movement, directional efficiency/count
+imbalance, and recent velocity. The audit includes all failed conditions and is
+also returned in `scalper.momentum` and `last_decision.details.momentum` when
+evaluated. During a quote gap or active-basket management it is not presented
+as a fresh entry assessment. Passing this filter is not an order authorization;
+structural, learned-entry, calendar, exposure, cost, risk and margin checks still
+apply. Count imbalance remains unchanged in the learned readout's input; adding
+price-path gating does not reinterpret existing learned weights.
 
 New Micro profiles default to **capacity sizing** and **no daily count cap**
 (`max_trades=0`). A positive count still selects an optional daily quota. Capacity
@@ -135,7 +155,8 @@ synapses remain fixed; this is an adaptive readout, not a pretrained trading bra
 
 Stop the worker and select the **same Micro profile that placed the trades** in
 Execution. Click **ارتقای Micro انتخاب‌شده با حفظ یادگیری**. The result is a new
-profile with unlimited daily count, capacity sizing and the patient exit defaults;
+profile with unlimited daily count, capacity sizing, price-path direction gating,
+structural entries, risk-based volume and the patient exit defaults;
 the UI selects it, but does not start execution. The old file stays untouched.
 The new profile retains its parent's learning lineage; server, login and actual
 DEMO/LIVE mode still scope the memory separately. Existing 86 weights keep their

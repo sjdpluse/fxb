@@ -1,5 +1,30 @@
 # Validation record
 
+## v0.8.0 — Measured Micro direction and explicit wait reasons — 2026-11-25 (Asia/Kabul)
+
+- New/explicitly upgraded profiles use signed net bid displacement divided by
+  absolute bid travel for direction gating. Existing profiles retain count
+  voting. Cost-covering movement, one-ATR maximum extension, fresh quotes,
+  velocity, structural confirmation and all account risk checks still apply.
+- The observed user snapshot had a -0.90 price move and zero count imbalance;
+  the latter definitely fails the old 0.60 threshold. The snapshot does not
+  include the raw quote path or ATR, so it cannot establish whether the new
+  policy would have entered that particular move.
+- Seven new regressions cover both directions, equal counts with unequal move
+  sizes, a noisy path with the same displacement, cost/ATR/velocity rejection,
+  missing/invalid measurements, legacy defaults, fake-SDK submission with an
+  opted-in policy, and continued structural rejection. These are synthetic
+  software fixtures, not market replay, execution benchmarks or profit evidence.
+- Local suite: **280 tests, 270 passed, 10 environment-dependent skips**.
+  JavaScript syntax and whitespace checks passed. The Chromium test now checks
+  numerical condition rendering, the PRICE PATH profile marker, and clearing
+  stale entry assessments during gaps. Windows/Python 3.13 and the full graph
+  remain covered by the repository's hosted test workflow.
+- Upgrade tests preserve learned state, learning lineage, source profile and
+  risk halts across restart. Neural dynamics and the existing count-imbalance
+  readout feature are unchanged. No native MT5 terminal or real trade was
+  operated by this development session.
+
 ## v0.7.2 — Preserve the actual account-halt reason — 2026-11-24 (Asia/Kabul)
 
 - Reproduced the misleading `basket_quota` label: the budget gate used it for

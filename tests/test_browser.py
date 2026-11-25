@@ -165,7 +165,7 @@ class BrowserTests(unittest.TestCase):
                              'scalp_style':'micro','risk':{'fraction':.005,'max_trades':250}}
                         updated=old|{'path':'runs/upgraded/model.npz','name':'upgraded',
                             'risk':{'fraction':.005,'max_trades':0},
-                            'micro_config':{'sizing_mode':'capacity','exit_policy':'confirmed'}}
+                            'micro_config':{'sizing_mode':'capacity','exit_policy':'confirmed','direction_policy':'price_path'}}
                         status['models']=[old]
                         expect(page.locator('[name=models]')).to_have_count(1)
                         page.locator('[name=models]').check()
@@ -181,8 +181,32 @@ class BrowserTests(unittest.TestCase):
                         expect(page.locator('[name=models]').nth(0)).not_to_be_checked()
                         expect(page.locator('#micro-upgrade-note')).to_contain_text('تجربه‌های همان حساب حفظ شده‌اند')
                         expect(page.locator('#model-choices')).to_contain_text('∞/day · AUTO · PATIENT')
+                        expect(page.locator('#model-choices')).to_contain_text('PRICE PATH')
                         self.assertEqual(upgrades,[{'model':old['path']}])
                         self.assertEqual(starts,[])
+                        momentum={'direction_policy':'tick_count','ready':False,'reason':'micro_direction_count',
+                            'failed_checks':['micro_direction_count'],'quote_time':time.time(),'side':-1,
+                            'movement':-.9,'minimum_movement':.845,'maximum_movement':1.5,
+                            'directionality':0.,'minimum_directionality':.6,'velocity':.6,'minimum_velocity':.005,
+                            'spread':.26,'cost_price':.52,'samples':16,'duration':7.5}
+                        status['scalper']={'symbol':'XAUUSD.m','style':'micro','momentum':momentum,
+                            'last_decision':{'action':'WAIT','reason':'micro_direction_count','details':{'momentum':momentum}}}
+                        expect(page.locator('#momentum-diagnostics')).to_be_visible()
+                        expect(page.locator('#scalp-status')).to_contain_text('تعداد تیک‌های هم‌جهت کافی نیست')
+                        expect(page.locator('#momentum-diagnostics')).to_contain_text('0.845')
+                        expect(page.locator('#momentum-diagnostics')).to_contain_text('TICK COUNT')
+                        expect(page.locator('#momentum-diagnostics tr').filter(has_text='غلبهٔ تعداد تیک')).to_contain_text('WAIT')
+                        momentum.update(direction_policy='price_path',ready=True,reason='micro_momentum_accepted',
+                                        failed_checks=[],directionality=.9/1.32)
+                        status['scalper']['last_decision']['reason']='no_structure_setup'
+                        expect(page.locator('#momentum-diagnostics')).to_contain_text('PRICE PATH')
+                        expect(page.locator('#momentum-diagnostics tr').filter(has_text='غلبهٔ اندازهٔ حرکت')).to_contain_text('68.2%')
+                        expect(page.locator('#momentum-diagnostics tr').filter(has_text='غلبهٔ اندازهٔ حرکت')).to_contain_text('PASS')
+                        expect(page.locator('#scalp-status')).to_contain_text('تأیید ساختار وجود ندارد')
+                        # A new observation gap must not display an old filter result.
+                        status['scalper']['momentum']=None
+                        status['scalper']['last_decision']={'action':'WAIT','reason':'micro_waiting_for_quote_momentum'}
+                        expect(page.locator('#momentum-diagnostics')).to_be_hidden()
                         status['account']['mode']='live'
                         expect(page.locator('#demo-session-panel')).to_be_hidden()
                         self.assertEqual(errors,[])

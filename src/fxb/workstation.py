@@ -400,7 +400,8 @@ class Workstation:
             raise ValueError("Basket risk percentage must be a number")
         micro = MicroConfig(basket_orders, basket_lot, basket_risk_percent/100,
             sizing_mode=sizing_mode, exit_policy="confirmed", min_hold_seconds=min_hold_seconds,
-            confirmation_seconds=confirmation_seconds, entry_policy="structure", lot_mode=lot_mode) if style == "micro" else None
+            confirmation_seconds=confirmation_seconds, entry_policy="structure", lot_mode=lot_mode,
+            direction_policy="price_path") if style == "micro" else None
         if micro and micro.min_hold_seconds >= risk.max_hold_bars*60:
             raise ValueError("Minimum protection hold must be shorter than maximum holding time")
         if micro and micro.basket_risk > risk.daily_loss:

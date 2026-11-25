@@ -18,7 +18,7 @@ from .mt5 import Blocked, MAGIC, NewsGate, closed_bar_status
 from .scalping import (ScalpConfig, analyze, readout_context, micro_readout_context,
                       learning_state, entry_score, learn_closed)
 from .scalper_runtime import policy, learning_scope, scalp_cycle
-from .micro_scalping import MicroConfig, quote_pressure, micro_signal, weakening
+from .micro_scalping import MicroConfig, quote_pressure, assess_micro_signal, weakening
 
 
 def account_key(account):
@@ -541,7 +541,7 @@ def execution_step(bridge, model_path, memory, expected_login, calendar=None, ex
             "micro_config": group.get("micro_config", asdict(MicroConfig())), "entries_today": guard.entries,
             "learning": {k: v for k, v in group_learning.items() if k not in ("weights", "tick_weights")},
             "basket": {k: group[k] for k in ("id", "status", "plan", "manual")},
-            "pressure": pressure, "last_decision": result}
+            "pressure": pressure, "momentum": None, "last_decision": result}
         if manual:
             raise Blocked("Existing basket is still being managed; manual entry was not sent")
         return result
@@ -626,8 +626,12 @@ def execution_step(bridge, model_path, memory, expected_login, calendar=None, ex
             return decision
         cost_price = 2*(spec.commission_per_lot_side*spec.tick_size/spec.tick_value +
                         math.ceil(spec.slippage_points)*spec.point)
-        signal = micro_signal(pressure, context["atr"], spec.tick_size, cost_price)
+        signal, momentum = assess_micro_signal(pressure, context["atr"], spec.tick_size, cost_price, micro.direction_policy)
+        bridge.scalp_status["momentum"] = momentum
+        decision["details"] = {"momentum": momentum}
         if not signal:
+            decision["reason"] = momentum["reason"]
+            bridge.neural_status["reason"] = momentum["reason"]
             bridge.scalp_status["last_decision"] = decision
             return decision
         if micro.entry_policy == "structure":
@@ -636,7 +640,7 @@ def execution_step(bridge, model_path, memory, expected_login, calendar=None, ex
                 zones = structure_plan(context["bars"], context["structure"], signal["side"],
                     pressure["bid"], context["atr"], spec.tick_size, context.get("signal"))
             except Blocked as error:
-                decision.update(reason=error.code, details=error.details)
+                decision.update(reason=error.code, details={"momentum": momentum, **(error.details or {})})
                 bridge.neural_status = {"phase": "waiting_for_setup", "reason": error.code}
                 bridge.scalp_status["last_decision"] = decision
                 return decision
@@ -650,6 +654,7 @@ def execution_step(bridge, model_path, memory, expected_login, calendar=None, ex
             "bar_closed_at": context["closed_at"], "quote_time": pressure["time"],
             "evaluated_at": time.time(), "setup": signal.get("structure_kind", signal["kind"]),
             "side": signal["side"], "zones": zones,
+            "momentum": momentum,
             "neural_window_ms": getattr(brain, "latest", {}).get("window_ms"),
             "neural_spikes": getattr(brain, "latest", {}).get("spikes", 0),
             "neural_observed_at": getattr(brain, "latest", {}).get("observed_at"),
@@ -682,6 +687,8 @@ def execution_step(bridge, model_path, memory, expected_login, calendar=None, ex
                            "decision_id": trace["id"] if trace else manual.get("request_id") if manual else None}
     result = submit_basket(bridge, memory, account, meta, digest, guard, side, context["atr"], lot, count,
                           fraction, options, deadline, vector, manual, cancelled, zones, trace)
+    if not manual:
+        result["details"] = (result.get("details") or {}) | {"momentum": momentum}
     bridge.neural_status = {"phase": "managing_positions" if result.get("orders_sent", 0) else
                            "entry_blocked" if result.get("status") in ("blocked", "rejected") else "waiting_for_ticks",
                            "reason": result.get("reason"), "last_submission": result.get("status"),

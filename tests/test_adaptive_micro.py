@@ -263,6 +263,7 @@ class UpgradeLearningTests(unittest.TestCase):
         self.assertEqual(meta['risk']['max_hold_bars'],5)
         self.assertEqual(meta['risk']['fraction'],self.meta['risk']['fraction'])
         self.assertEqual(meta['micro_config']['sizing_mode'],'capacity')
+        self.assertEqual(meta['micro_config']['direction_policy'],'price_path')
         self.assertNotEqual(sha256(target),self.digest)
         self.assertEqual(learning_scope(self.account,sha256(target),meta),self.scope)
         self.assertNotEqual(learning_scope(NS(login=123,server='test',trade_mode=2),sha256(target),meta),self.scope)

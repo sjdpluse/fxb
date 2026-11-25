@@ -196,7 +196,8 @@ def run(args):
                           (0 if args.style == "micro" else None) if args.max_trades is None else args.max_trades,
                           None if args.daily_loss_percent is None else args.daily_loss_percent/100,
                           args.hold_minutes if args.style == "micro" else None)
-        micro = MicroConfig(sizing_mode=args.sizing_mode, exit_policy="confirmed") if args.style == "micro" else None
+        micro = MicroConfig(sizing_mode=args.sizing_mode, exit_policy="confirmed",
+                            direction_policy="price_path") if args.style == "micro" else None
         controller = Workstation(args.root)
         try:
             with WorkerLock(controller.db_path):

@@ -50,7 +50,7 @@ def create_profile(bridge, symbol, output, commission, slippage, overnight, conf
             "context_sha256": bars.digest(), "initial_policy": "explicit_rules_with_zero_online_samples",
             "learning": "bounded_reward_readout_after_fully_closed_broker_positions"}
     if cfg.style == "micro":
-        micro = micro or MicroConfig()
+        micro = micro or MicroConfig(direction_policy="price_path")
         if micro.basket_risk > risk.daily_loss:
             raise ValueError("Basket risk cannot exceed the daily loss limit")
         if micro.exit_policy == "confirmed" and micro.min_hold_seconds >= risk.max_hold_bars*60:
@@ -131,7 +131,8 @@ def upgrade_micro_profile(source, output):
         raise ValueError("Basket risk exceeds daily limit")
     parent = sha256(source)
     new_risk = replace(risk, max_trades=0, max_hold_bars=5)
-    new_micro = replace(micro, sizing_mode="capacity", exit_policy="confirmed", entry_policy="structure", lot_mode="risk")
+    new_micro = replace(micro, sizing_mode="capacity", exit_policy="confirmed", entry_policy="structure", lot_mode="risk",
+                        direction_policy="price_path")
     meta.update(risk=asdict(new_risk), micro_config=asdict(new_micro), learning_version=2,
         learning_key=meta.get("learning_key", parent), parent_model_sha256=parent,
         run_id=output.name, created_at=time.time(),
