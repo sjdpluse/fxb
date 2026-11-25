@@ -151,6 +151,8 @@ class Workstation:
         memory = Memory(self.db_path)
         try:
             journal = memory.stats()
+            from .entry_diagnostics import reports
+            entry_reports = reports(memory)
         finally:
             memory.close()
         try:
@@ -172,9 +174,19 @@ class Workstation:
                 "pipeline": {"last_evaluation": getattr(self.bridge, "last_evaluation", None),
                              "last_entry": getattr(self.bridge, "last_entry_trace", None)},
                 "scalper": getattr(self.bridge, "scalp_status", None),
+                "entry_diagnostics": {"reports": entry_reports,
+                                      "error": getattr(self.bridge, "entry_diagnostic_error", None)},
                 "manual_order": self.manual_result,
                 "error": self.last_error, "live_activation": self.authorization.public_status() if self.authorization else None,
                 "config": self.config, "connected": self.bridge is not None}
+
+    def entry_diagnostic(self, report_id=None):
+        from .entry_diagnostics import load_report
+        memory = Memory(self.db_path)
+        try:
+            return load_report(memory, report_id)
+        finally:
+            memory.close()
 
     def launch_job(self, kind, function):
         with self.lock:

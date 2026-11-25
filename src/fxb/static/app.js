@@ -63,6 +63,58 @@ document.querySelector('.brand').addEventListener('click',e=>{e.preventDefault()
 document.querySelectorAll('[data-action]').forEach(el=>el.addEventListener('click',async()=>{el.disabled=true;try{await command(el.dataset.action);}catch{}finally{el.disabled=false;}}));
 function table(headers,rows,empty){return rows.length?`<table><thead><tr>${headers.map(h=>`<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${r.map(c=>`<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table>`:`<div class="empty">${esc(empty)}</div>`;}
 const kabTime=t=>new Date(t*1000).toLocaleTimeString('en-GB',{timeZone:'Asia/Kabul',hour12:false});
+const setupNames={ict_retest:'بازآزمایی FVG / ICT',confirmed_liquidity_sweep:'برگشت نقدینگی',micro_breakout_retest:'شکست و بازآزمایی',micro_trend_pullback:'پولبک روند'};
+const setupChecks={signal_present:'وجود سیگنال FVG',signal_side:'جهت سیگنال',sweep_side:'جهت برگشت نقدینگی',
+  candle_body:'بدنهٔ کندل در جهت ورود',distance_from_close:'فاصلهٔ قیمت از بسته‌شدن M1',m5_bias:'جهت M5',
+  recent_break:'شکست سطح در دو کندل اخیر',close_beyond_level:'بسته‌شدن آن‌سوی سطح',retest_distance:'فاصلهٔ بازآزمایی',
+  entry_distance:'فاصلهٔ ورود از سطح',swing_trend:'جهت Swing',close_vs_ema:'بسته‌شدن نسبت به EMA',pullback_distance:'فاصلهٔ پولبک از EMA'};
+let entryReportSelection='',entryReportKey='',diagnosticDownloadBusy=false;
+function renderEntryAssessment(s){
+  const scalp=s.scalper,d=scalp?.last_decision||{},m=scalp?.momentum||d.details?.momentum;
+  const audit=scalp?.setup_assessment||d.details?.setup_assessment;
+  const el=$('structure-diagnostics'),summary=$('entry-progress');
+  const reason=failureCode(d)||failureCode(s.worker),phase=s.brain?.activity?.execution?.phase;
+  if(!s.running)summary.textContent='موتور خاموش است. گزارش‌های ذخیره‌شده، مشاهدهٔ زنده نیستند.';
+  else if(phase==='managing_positions')summary.textContent='موقعیت باز در حال مدیریت است؛ ورود جدید بررسی نمی‌شود.';
+  else if(!s.entries_enabled)summary.textContent='ورود جدید متوقف است.';
+  else if(reason==='no_structure_setup')summary.textContent='ورود تأیید نشده: حرکت قیمت PASS؛ الگوی ساختاری WAIT. ارزیابی نهایی سفارش هنوز انجام نشده است.';
+  else if(['structure_stop_distance','no_structure_target'].includes(reason))summary.textContent='ورود تأیید نشده: '+scalpReason(reason)+'.';
+  else if(d.orders_sent>0)summary.textContent='ارسال سفارش تأییدشده در آخرین تصمیم: '+num(d.orders_sent)+'. وضعیت موقعیت‌ها را در پنل حساب ببینید.';
+  else summary.textContent='نتیجهٔ فعلی ورود: '+scalpReason(reason||m?.reason)+'. PASS حرکت قیمت فقط مرحلهٔ اول است.';
+  el.hidden=!audit||!m;
+  if(audit&&m){
+    const expanded=new Set([...el.querySelectorAll('details[open]')].map(x=>x.dataset.setup));
+    const value=v=>typeof v==='boolean'?(v?'بله':'خیر'):v==null?'—':num(v,3);
+    const threshold=c=>c.operator==='between'?c.threshold.map(value).join(' … '):c.operator==='in'?'یکی از '+c.threshold.map(value).join(' / '):({eq:'=',gt:'>',ge:'≥',le:'≤'}[c.operator]||c.operator)+' '+value(c.threshold);
+    el.innerHTML='<p dir="rtl">مرحلهٔ ساختار M1 · تأیید یکی از الگوهای زیر کافی است. هر الگو باید تمام شروط خودش را پاس کند. انتخاب الگو، تأیید نهایی ریسک و سفارش نیست.</p>'+
+      audit.candidates.map(c=>{
+        const failed=c.checks.filter(x=>!x.passed).map(x=>setupChecks[x.name]||x.name);
+        const status=c.status==='pass'?'PASS':c.status==='wait'?'WAIT':'بررسی نشده';
+        const rows=c.checks.map(x=>[esc(setupChecks[x.name]||x.name),esc(value(x.value)),esc(threshold(x)),x.passed?'<span class="positive">PASS</span>':'<span class="negative">WAIT</span>']);
+        return `<details class="setup-candidate" data-setup="${esc(c.kind)}" ${expanded.has(c.kind)?'open':''}><summary>${esc(setupNames[c.kind]||c.kind)} · ${esc(status)}${failed.length?' — '+esc(failed.join('، ')):''}</summary>`+
+          table(['شرط ساختار','اندازه‌گیری','شرط لازم','نتیجه'],rows,'بعد از انتخاب الگوی قبلی بررسی نشد.')+'</details>';
+      }).join('');
+  }else el.innerHTML='';
+  const reports=s.entry_diagnostics?.reports||[],select=$('entry-report-select');
+  const selected=reports.some(r=>r.id===entryReportSelection)?entryReportSelection:reports[0]?.id||'';
+  const reportKey=JSON.stringify(reports);
+  if(entryReportKey!==reportKey){entryReportKey=reportKey;select.innerHTML=reports.map(r=>`<option value="${esc(r.id)}">${esc(r.captured_kabul)} · ${esc(r.symbol)} · ${r.side===1?'BUY':'SELL'} · ${esc(scalpReason(r.reason))}</option>`).join('');}
+  select.value=selected;select.disabled=!reports.length;
+  $('entry-report-download').disabled=diagnosticDownloadBusy||!reports.length||s.preview;
+  $('entry-report-note').textContent=s.entry_diagnostics?.error?'ثبت گزارش ناموفق بود: '+s.entry_diagnostics.error:
+    reports.length?'اولین رد ساختاری هر کندل/جهت/علت ذخیره می‌شود؛ حداکثر ۱۲ گزارش. زمان گزارش را بررسی کنید. دانلود، سفارش ارسال نمی‌کند.':'هنوز گزارشی ثبت نشده؛ پس از PASS حرکت قیمت و رد ساختار، گزارش خودکار ذخیره می‌شود.';
+}
+$('entry-report-select').addEventListener('change',e=>{entryReportSelection=e.target.value;});
+$('entry-report-download').addEventListener('click',async()=>{
+  const id=$('entry-report-select').value;if(!id||diagnosticDownloadBusy)return;
+  diagnosticDownloadBusy=true;$('entry-report-download').disabled=true;
+  try{
+    const report=await api('diagnostics/entry/'+encodeURIComponent(id));
+    const url=URL.createObjectURL(new Blob([JSON.stringify(report,null,2)],{type:'application/json'}));
+    const a=document.createElement('a');a.href=url;a.download='FXB-entry-'+report.id+'.json';document.body.appendChild(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),1000);toast('گزارش تصمیم برای دانلود آماده شد.');
+  }catch(e){toast(e.message,true);}finally{diagnosticDownloadBusy=false;$('entry-report-download').disabled=false;}
+});
 function renderMomentum(scalp){
   const el=$('momentum-diagnostics'),m=scalp?.momentum||scalp?.last_decision?.details?.momentum;
   el.hidden=!m;
@@ -129,6 +181,7 @@ function render(s){
     $('model-choices').innerHTML=s.models.length?s.models.map(m=>`<label class="model-choice"><input type="checkbox" name="models" value="${esc(m.path)}" ${checked.has(m.path)?'checked':''}><span>${esc(m.symbol)} / ${esc(m.name)}<small>${esc(m.encoder)} · ${m.synthetic?'SYNTHETIC — dry run only':m.strategy?`M1 ${(m.scalp_style||'structure').toUpperCase()} · ${num(m.risk.fraction*100,2)}% risk · ${m.risk.max_trades===0?'∞':num(m.risk.max_trades)}/day${m.micro_config?.sizing_mode==='capacity'?' · AUTO':''}${m.micro_config?.exit_policy==='confirmed'?' · PATIENT':''}${m.micro_config?.entry_policy==='structure'?' · STRUCTURE':''}${m.micro_config?.lot_mode==='risk'?' · RISK LOT':''}${m.micro_config?.direction_policy==='price_path'?' · PRICE PATH':''}`:'REAL MARKET DATA'}</small></span></label>`).join(''):'مدل آموزش‌دیده‌ای موجود نیست.';}
   $('micro-upgrade-button').disabled=upgradeBusy||s.running||s.preview||s.job.status==='running';
   const scalp=s.scalper;
+  renderEntryAssessment(s);
   renderMomentum(scalp);
   if(scalp){const l=scalp.learning||{},t=scalp.structure||{},d=scalp.last_decision||{},r=scalp.risk||{},stats=scalp.activity_stats||{};
     $('scalp-status').className='pad';$('scalp-status').innerHTML=table(['SYMBOL','SWING HIGH / LOW','M5 BIAS','LEARNED BASKETS / TRADES','REALIZED NET','LAST DECISION'],[[esc(scalp.symbol),num(t.swing_high,2)+' / '+num(t.swing_low,2),esc(t.m5_bias??'—'),num(l.samples),num(l.net_cashflow,2)+' '+esc(a?.currency||''),esc(d.action||'WAIT')+' · '+esc(scalpReason(d.reason_code||d.reason))]],'');
@@ -137,7 +190,7 @@ function render(s){
     let detail=`کندل‌های بررسی‌شدهٔ امروز: ${num(stats.bars||0)} · کندل‌های دارای فرصت: ${num(stats.signal_bars||0)}. ${reasons}`;
     if(scalp.entry_gate)detail+=` | مانع فعلی ورود: ${scalpReason(scalp.entry_gate)}. سقف سرمایهٔ ثبت‌شده ${num(scalp.risk_peak_equity,2)} و سرمایهٔ ابتدای روز ${num(scalp.day_start_equity,2)} ${a?.currency||''}.`;
     if(d.sizing&&d.sizing.minimum_lot!=null){const z=d.sizing;detail+=` | حداقل لات ${num(z.minimum_lot,2)}: زیان محاسبه‌شده تا حد ضرر و هزینه‌ها ${num(z.minimum_lot_risk_cash,2)} ${z.currency} (${num(z.minimum_lot_risk_percent,2)}٪ سرمایه)، بودجهٔ انتخاب‌شده ${num(z.risk_budget_cash,2)} ${z.currency}. مارجین لازم ${num(z.minimum_lot_margin_cash,2)} / بودجهٔ مارجین ${num(z.margin_budget_cash,2)} ${z.currency}.`;}
-    if(scalp.style==='micro'){detail+=` | فشار تیک: ${num(scalp.pressure?.velocity,3)} / ثانیه · پوزیشن‌های سبد: ${num(d.open_positions)} · خالص تخمینی خروج: ${num(d.estimated_liquidation_net,2)} ${a?.currency||''}`;} detail+=' | آخرین پاداش: '+num(l.last_reward_r,3)+'R · میانگین پاداش: '+num(l.samples?l.sum_r/l.samples:null,3)+'R · نسخهٔ یادگیری: '+num(l.revision)+' · تغییر وزن: '+num(l.last_weight_delta,6); if(d.exit_diagnostics){const x=d.exit_diagnostics;detail+=' | محافظت سود: '+(x.armed?'آماده':'در انتظار سود معنادار')+' · سود لازم '+num(x.arm_net_cash,2)+' · اوج سود '+num(x.peak_net_cash,2)+' · برگشت لازم '+num(x.required_giveback_cash,2);} const plan=d.plan||scalp.basket?.plan;if(plan?.count_limits)detail+=' | ظرفیت محاسبه‌شده: '+num(plan.requested_orders)+' · عامل محدودکننده: '+plan.limiting_factors.join(', '); if(d.details){const {momentum,...otherDetails}=d.details;if(Object.keys(otherDetails).length)detail+=' | '+JSON.stringify(otherDetails);} if(d.error)detail+=' | '+JSON.stringify(d.error); $('scalp-diagnostics').textContent=detail;
+    if(scalp.style==='micro'){detail+=` | فشار تیک: ${num(scalp.pressure?.velocity,3)} / ثانیه · پوزیشن‌های سبد: ${num(d.open_positions)} · خالص تخمینی خروج: ${num(d.estimated_liquidation_net,2)} ${a?.currency||''}`;} detail+=' | آخرین پاداش: '+num(l.last_reward_r,3)+'R · میانگین پاداش: '+num(l.samples?l.sum_r/l.samples:null,3)+'R · نسخهٔ یادگیری: '+num(l.revision)+' · تغییر وزن: '+num(l.last_weight_delta,6); if(d.exit_diagnostics){const x=d.exit_diagnostics;detail+=' | محافظت سود: '+(x.armed?'آماده':'در انتظار سود معنادار')+' · سود لازم '+num(x.arm_net_cash,2)+' · اوج سود '+num(x.peak_net_cash,2)+' · برگشت لازم '+num(x.required_giveback_cash,2);} const plan=d.plan||scalp.basket?.plan;if(plan?.count_limits)detail+=' | ظرفیت محاسبه‌شده: '+num(plan.requested_orders)+' · عامل محدودکننده: '+plan.limiting_factors.join(', '); if(d.details){const {momentum,setup_assessment,...otherDetails}=d.details;if(Object.keys(otherDetails).length)detail+=' | '+JSON.stringify(otherDetails);} if(d.error)detail+=' | '+JSON.stringify(d.error); $('scalp-diagnostics').textContent=detail;
   }else{$('scalp-limits').textContent='حدود ریسک از پروفایل فعال خوانده می‌شود.';$('scalp-diagnostics').textContent='';}
   const manual=s.manual_order, pending=manual&&['queued','processing'].includes(manual.status);
   const m1=s.active_models.length===1&&s.models.some(m=>m.path===s.active_models[0]&&m.strategy);

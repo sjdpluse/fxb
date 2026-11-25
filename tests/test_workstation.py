@@ -33,6 +33,9 @@ class WorkstationTests(unittest.TestCase):
         self.assertIsNone(status["account"])
         self.assertEqual(status["positions"], [])
         self.assertFalse(status["running"])
+        self.assertEqual(status["entry_diagnostics"]["reports"], [])
+        self.assertEqual(self.client.get('/api/diagnostics/entry').status_code, 401)
+        self.assertEqual(self.client.get('/api/diagnostics/entry', headers=self.headers).status_code, 409)
 
     def test_bad_host_and_cross_origin_control_are_rejected(self):
         self.assertEqual(self.client.get("/api/status", headers=self.headers | {"Host": "attacker.example"}).status_code, 400)

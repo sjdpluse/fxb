@@ -191,6 +191,9 @@ class BrowserTests(unittest.TestCase):
                             'spread':.26,'cost_price':.52,'samples':16,'duration':7.5}
                         status['scalper']={'symbol':'XAUUSD.m','style':'micro','momentum':momentum,
                             'last_decision':{'action':'WAIT','reason':'micro_direction_count','details':{'momentum':momentum}}}
+                        status.update(running=True,entries_enabled=True)
+                        status['worker']={'phase':'waiting','reason':'micro_direction_count'}
+                        status['brain']['activity']['execution']={'phase':'waiting_for_ticks','reason':'micro_direction_count'}
                         expect(page.locator('#momentum-diagnostics')).to_be_visible()
                         expect(page.locator('#scalp-status')).to_contain_text('تعداد تیک‌های هم‌جهت کافی نیست')
                         expect(page.locator('#momentum-diagnostics')).to_contain_text('0.845')
@@ -203,10 +206,46 @@ class BrowserTests(unittest.TestCase):
                         expect(page.locator('#momentum-diagnostics tr').filter(has_text='غلبهٔ اندازهٔ حرکت')).to_contain_text('68.2%')
                         expect(page.locator('#momentum-diagnostics tr').filter(has_text='غلبهٔ اندازهٔ حرکت')).to_contain_text('PASS')
                         expect(page.locator('#scalp-status')).to_contain_text('تأیید ساختار وجود ندارد')
+                        expect(page.locator('#entry-progress')).to_contain_text('الگوی ساختاری WAIT')
+                        expect(page.locator('#momentum-diagnostics .positive')).to_have_count(4)
+                        audit={'matched':False,'side':-1,'bar_closed_at':time.time()-30,'candidates':[
+                            {'kind':'micro_trend_pullback','status':'wait','checks':[
+                                {'name':'m5_bias','value':-1,'operator':'eq','threshold':-1,'passed':True},
+                                {'name':'candle_body','value':.1,'operator':'gt','threshold':.2634,'passed':False}]}]}
+                        status['scalper']['setup_assessment']=audit
+                        expect(page.locator('#structure-diagnostics')).to_be_visible()
+                        expect(page.locator('#structure-diagnostics summary')).to_contain_text('پولبک روند · WAIT')
+                        page.locator('#structure-diagnostics summary').click()
+                        row=page.locator('#structure-diagnostics tr').filter(has_text='بدنهٔ کندل در جهت ورود')
+                        expect(row).to_contain_text('0.263')
+                        expect(row).to_contain_text('WAIT')
+                        momentum['velocity']=.7
+                        expect(page.locator('#momentum-diagnostics')).to_contain_text('0.700')
+                        expect(page.locator('#structure-diagnostics details')).to_have_attribute('open','')
+                        report_id='00000000-0000-4000-8000-000000000002'
+                        report={'schema':'fxb-entry-rejection-v1','id':report_id,'reason':'no_structure_setup',
+                            'market':{'rows':[[i,100,101,99,100,10,.02] for i in range(500)]},'orders_sent':0}
+                        status['entry_diagnostics']={'error':None,'reports':[{'id':report_id,'captured_at':time.time(),
+                            'captured_kabul':'2026-11-25T13:21:32+04:30','symbol':'XAUUSD.m','side':-1,'reason':'no_structure_setup'}]}
+                        downloads=[]
+                        def download_response(route):
+                            downloads.append((route.request.method,route.request.url))
+                            route.fulfill(status=200,content_type='application/json',body=json.dumps(report))
+                        page.route('**/api/diagnostics/entry/'+report_id,download_response)
+                        expect(page.locator('#entry-report-download')).to_be_enabled()
+                        with page.expect_download() as downloading:
+                            page.locator('#entry-report-download').click()
+                        downloaded=downloading.value
+                        self.assertEqual(downloaded.suggested_filename,'FXB-entry-'+report_id+'.json')
+                        self.assertEqual(json.loads(Path(downloaded.path()).read_text()),report)
+                        self.assertEqual(len(downloads),1)
+                        self.assertEqual(downloads[0][0],'GET')
+                        self.assertEqual(starts,[])
                         # A new observation gap must not display an old filter result.
                         status['scalper']['momentum']=None
                         status['scalper']['last_decision']={'action':'WAIT','reason':'micro_waiting_for_quote_momentum'}
                         expect(page.locator('#momentum-diagnostics')).to_be_hidden()
+                        expect(page.locator('#structure-diagnostics')).to_be_hidden()
                         status['account']['mode']='live'
                         expect(page.locator('#demo-session-panel')).to_be_hidden()
                         self.assertEqual(errors,[])

@@ -1,5 +1,37 @@
 # Validation record
 
+## v0.8.1 — Captured structural rejections — 2026-11-25 (Asia/Kabul)
+
+- Added measured setup alternatives: FVG/ICT, liquidity sweep, breakout retest
+  and trend pullback. A matching alternative is sufficient; alternatives after
+  a match are explicitly not evaluated. A setup match remains distinct from
+  valid stop/target geometry and final risk/broker authorization.
+- The worker records the first structural rejection for each account, profile,
+  bar, direction and reason after momentum passes. Twelve atomic local snapshots
+  are retained with 500 closed bars, sampled quotes, settings and measurements.
+  They survive restart without going into learning or the cloud outbox. The
+  authenticated download uses a fixed report ID; pruned IDs cannot return some
+  other decision. The report excludes account identifiers, balances, credentials
+  and model weights. No historical snapshot can be recovered from a screenshot.
+- Read-only replay recomputes the actual momentum and structural rejection from
+  captured bars and quotes, checks bar integrity and returns zero orders. A
+  matching reason establishes reproducibility, not optimal trading or profit.
+- Local suite: **289 tests, 279 passed, 10 environment-dependent skips**.
+  Nine new tests cover numeric rule failures, alternative selection in both
+  directions, snapshot/replay across restart, data immutability and privacy,
+  sampling/deduplication, bounded retention with guard preservation, write
+  failure without an order, owner-only downloads without MT5 calls, and
+  corrupted-input rejection. JavaScript syntax and whitespace checks passed.
+- A deterministic comparison of 600 synthetic cases (seed 82) against the
+  v0.8.0 planner produced identical selected plans or rejection codes across
+  manual, ICT, sweep, retest, pullback, missing setup, stop and target cases.
+  The planner's trading thresholds, priority and output zones are unchanged.
+- The hosted Chromium test checks all four momentum PASS rows alongside a
+  structural WAIT, expanded numeric conditions surviving refresh, and a real
+  JSON download with 500 rows without starting execution. The repository's
+  Windows/Linux and full-connectome jobs cover the same release revision.
+  No native MT5 terminal or actual trade is operated during these tests.
+
 ## v0.8.0 — Measured Micro direction and explicit wait reasons — 2026-11-25 (Asia/Kabul)
 
 - New/explicitly upgraded profiles use signed net bid displacement divided by

@@ -95,6 +95,13 @@ def create_app(root=".", preview=False, token=None):
     def status():
         return controller.status()
 
+    @app.get("/api/diagnostics/entry")
+    @app.get("/api/diagnostics/entry/{report_id}")
+    def entry_diagnostic(report_id: str | None = None):
+        report = controller.entry_diagnostic(report_id)
+        return JSONResponse(report, headers={
+            "Content-Disposition": f'attachment; filename="FXB-entry-{report["id"]}.json"'})
+
     @lru_cache(maxsize=1)
     def anatomical_geometry():
         return geometry(controller.brain_dir)

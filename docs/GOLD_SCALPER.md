@@ -1,4 +1,44 @@
-# Gold M1 scalper — 0.7.0
+# Gold M1 scalper — 0.8.1
+
+## Recorded entry diagnostics
+
+In 0.8.1, Execution distinguishes a passing quote-momentum filter from entry
+permission. The structure panel shows each alternative's actual measurements,
+thresholds and failed conditions. One matching alternative is sufficient;
+later alternatives are labelled not evaluated after a match. Zone validity,
+net reward/risk, learned-entry, calendar and account checks still follow.
+
+When momentum passes but structural setup, stop geometry or target discovery
+rejects the entry, the worker automatically captures the **first** rejection
+per account/profile/closed M1 bar/direction/reason. The JSON contains the exact
+500 closed bars used by that assessment, up to 64 sampled bid/ask quotes,
+profile settings, ATR, computed structure and measured rejection. Repeating
+the same rejection within that bar does not overwrite the first sample.
+At most twelve snapshots are retained atomically in local state, separately
+from the event/cloud outbox, learning weights, orders and account risk state.
+Failure to save a diagnostic cannot authorize a rejected order.
+
+Select the recorded Kabul timestamp in Execution and click
+**دانلود گزارش تصمیم و ۵۰۰ کندل**. The authenticated, read-only endpoint is
+`GET /api/diagnostics/entry/{id}` (`/api/diagnostics/entry` returns the latest).
+The download is a frozen observation, not a new MT5 data request. It remains
+available after restart; expired report IDs do not silently return a different
+snapshot. Credentials, account identifiers/balances and learned weights are
+excluded. The user's earlier screenshot cannot be reconstructed retroactively;
+the next qualifying decision will supply the missing candles.
+
+For a read-only reproduction with no broker connection or model training:
+
+```powershell
+.\.venv\Scripts\python.exe -m fxb.entry_diagnostics --report 'C:\path\FXB-entry-ID.json'
+```
+
+This recomputes momentum and structural selection from the captured arrays,
+with an integrity check on captured bars. `reason_matches` means the decision
+is reproducible; it does not establish that the rejection was economically
+optimal, validate profitability, or authorize trading. An update can be checked
+against the same report without placing a trade. Existing profiles need no
+upgrade for diagnostics; trading rules, neural dynamics and risk remain intact.
 
 ## Structural entries in 0.7.0
 

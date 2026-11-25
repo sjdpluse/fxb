@@ -541,7 +541,7 @@ def execution_step(bridge, model_path, memory, expected_login, calendar=None, ex
             "micro_config": group.get("micro_config", asdict(MicroConfig())), "entries_today": guard.entries,
             "learning": {k: v for k, v in group_learning.items() if k not in ("weights", "tick_weights")},
             "basket": {k: group[k] for k in ("id", "status", "plan", "manual")},
-            "pressure": pressure, "momentum": None, "last_decision": result}
+            "pressure": pressure, "momentum": None, "setup_assessment": None, "last_decision": result}
         if manual:
             raise Blocked("Existing basket is still being managed; manual entry was not sent")
         return result
@@ -641,9 +641,16 @@ def execution_step(bridge, model_path, memory, expected_login, calendar=None, ex
                     pressure["bid"], context["atr"], spec.tick_size, context.get("signal"))
             except Blocked as error:
                 decision.update(reason=error.code, details={"momentum": momentum, **(error.details or {})})
+                bridge.scalp_status["setup_assessment"] = (error.details or {}).get("setup_assessment")
                 bridge.neural_status = {"phase": "waiting_for_setup", "reason": error.code}
+                from .entry_diagnostics import capture_rejection
+                report = capture_rejection(bridge, memory, context, meta, digest, ak, mode, decision, history)
+                if report:
+                    decision["diagnostic_id"] = report["id"]
                 bridge.scalp_status["last_decision"] = decision
                 return decision
+            bridge.scalp_status["setup_assessment"] = zones["setup_assessment"]
+            decision["details"]["setup_assessment"] = zones["setup_assessment"]
             signal["structure_kind"] = zones["kind"]
         vector = (micro_readout_context(context["encoded"], signal, context["atr"])
                   if meta.get("learning_version", 1) == 2 else readout_context(context["encoded"], signal))

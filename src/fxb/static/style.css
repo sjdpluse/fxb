@@ -8,3 +8,7 @@
 .manual-receipt { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 420px; overflow-y: auto; }
 
 .trace-panel{margin-bottom:20px}.trace-panel canvas{width:100%;height:180px;background:#0b1116;border-radius:6px}.trace-panel details{margin:14px 0}.trace-panel summary{cursor:pointer}.trace-panel p{line-height:1.9}
+
+.setup-candidate{margin:10px 0;border:1px solid var(--line);border-radius:5px;overflow-x:auto}.setup-candidate summary{cursor:pointer;padding:12px;text-align:right;direction:rtl}.setup-candidate table{margin:0 12px;width:calc(100% - 24px)}#entry-progress{margin:16px 20px;font-weight:bold}#structure-diagnostics{overflow-x:auto}
+
+#entry-report-select{width:100%;min-width:0}
